@@ -76,6 +76,10 @@ df = spark.read.schema(transactions_schema).json("/mnt/zetadex-mainnet-landing/t
 
 # COMMAND ----------
 
+df.select("block_time").select(F.min("block_time"), F.max("block_time")).show()
+
+# COMMAND ----------
+
 display(df)
 
 # COMMAND ----------
@@ -186,7 +190,7 @@ liquidate_df = (df.filter("is_successful")
             (F.col("event.event.liquidator_reward").cast("decimal") / PRICE_FACTOR).alias("liquidator_reward"),
             (F.col("event.event.insurance_reward").cast("decimal") / PRICE_FACTOR).alias("insurance_reward"),
             (F.col("event.event.cost_of_trades").cast("decimal") / PRICE_FACTOR).alias("cost_of_trades"),
-            (F.col("event.event.size").cast("decimal") / SIZE_FACTOR).alias("size"),
+            (F.col("event.event.size").cast("decimal") / SIZE_FACTOR).alias("size"), # duplicate of the args?
             (F.col("event.event.remaining_liquidatee_balance").cast("decimal") / PRICE_FACTOR).alias("remaining_liquidatee_balance"),
             (F.col("event.event.remaining_liquidator_balance").cast("decimal") / PRICE_FACTOR).alias("remaining_liquidator_balance"),
             (F.col("event.event.mark_price").cast("decimal") / PRICE_FACTOR).alias("mark_price"),
@@ -249,10 +253,11 @@ trade_event_df = (df.filter("is_successful")
             "signature",
             "event.name",
             "event.event.margin_account",
-            F.col("event.event.index").cast("smallint").alias("index"),
+            ((F.col("event.event.cost_of_trades").cast("decimal") / F.col("event.event.size").cast("decimal")) / (PRICE_FACTOR/SIZE_FACTOR)).alias("price"),
             (F.col("event.event.size").cast("decimal") / SIZE_FACTOR).alias("size"),
-            (F.col("event.event.cost_of_trades").cast("decimal") / PRICE_FACTOR).alias("cost_of_trades"),
-            F.col("event.event.is_bid").cast("boolean").alias("is_bid"),
+#             (F.col("event.event.cost_of_trades").cast("decimal") / PRICE_FACTOR).alias("cost_of_trades"),
+            F.when(F.col("event.event.is_bid").cast("boolean"), "bid").otherwise("ask").alias("side"),
+            F.col("event.event.index").cast("smallint").alias("market_index"),
             "event.event.client_order_id",
             "event.event.order_id",
             F.col("instruction.accounts.named").alias("accounts"),
