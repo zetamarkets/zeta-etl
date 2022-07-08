@@ -103,11 +103,13 @@ deposit_df = (df.filter("is_successful")
         .select(
             "signature",
             "instruction.name",
-            (F.col("instruction.args.amount").cast("decimal") / SIZE_FACTOR).alias("amount"),
+            (F.col("instruction.args.amount").cast("decimal") / PRICE_FACTOR).alias("amount"),
             F.col("instruction.accounts.named").alias("accounts"),
-            "slot"
+            "slot",
+            "block_time"
         )
 )
+display(deposit_df)
 
 # COMMAND ----------
 
@@ -118,11 +120,13 @@ withdraw_df = (df.filter("is_successful")
         .select(
             "signature",
             "instruction.name",
-            (F.col("instruction.args.amount").cast("decimal") / SIZE_FACTOR).alias("amount"),
+            (F.col("instruction.args.amount").cast("decimal") / PRICE_FACTOR).alias("amount"),
             F.col("instruction.accounts.named").alias("accounts"),
-            "slot"
+            "slot",
+            "block_time"
         )
 )
+display(withdraw_df)
 
 # COMMAND ----------
 
@@ -143,9 +147,11 @@ place_order_df = (df.filter("is_successful")
             (F.col("event.event.oracle_price").cast("decimal") / PRICE_FACTOR).alias("oracle_price"),
             "event.event.order_id",
             F.col("instruction.accounts.named").alias("accounts"),
-            "slot"
+            "slot",
+            "block_time"
         )
 )
+display(place_order_df)
 
 # COMMAND ----------
 
@@ -160,9 +166,11 @@ cancel_order_df = (df.filter("is_successful")
             "instruction.args.order_id",
             "instruction.args.client_order_id",
             F.col("instruction.accounts.named").alias("accounts"),
-            "slot"
+            "slot",
+            "block_time"
         )
 )
+display(cancel_order_df)
 
 # COMMAND ----------
 
@@ -184,9 +192,11 @@ liquidate_df = (df.filter("is_successful")
             (F.col("event.event.mark_price").cast("decimal") / PRICE_FACTOR).alias("mark_price"),
             (F.col("event.event.underlying_price").cast("decimal") / PRICE_FACTOR).alias("underlying_price"),
             F.col("instruction.accounts.named").alias("accounts"),
-            "slot"
+            "slot",
+            "block_time"
         )
 )
+display(liquidate_df)
 
 # COMMAND ----------
 
@@ -205,9 +215,11 @@ position_movement_df = (df.filter("is_successful")
             (F.col("event.event.spread_account_balance").cast("decimal") / PRICE_FACTOR).alias("spread_account_balance"),
             (F.col("event.event.movement_fees").cast("decimal") / PRICE_FACTOR).alias("movement_fees"),
             F.col("instruction.accounts.named").alias("accounts"),
-            "slot"
+            "slot",
+            "block_time"
         )
 )
+display(position_movement_df)
 
 # COMMAND ----------
 
@@ -220,9 +232,11 @@ settle_positions_df = (df.filter("is_successful")
             "instruction.name",
             F.col("instruction.args.expiry_ts").cast("timestamp").alias("expiry_ts"),
             F.col("instruction.accounts.named").alias("accounts"),
-            "slot"
+            "slot",
+            "block_time"
         )
 )
+display(settle_positions_df)
 
 # COMMAND ----------
 
@@ -230,21 +244,23 @@ settle_positions_df = (df.filter("is_successful")
 trade_event_df = (df.filter("is_successful")
         .withColumn("instruction", F.explode("instructions"))
         .filter("instruction.name == 'crank_event_queue'")
-        .withColumn("event", F.explode("instruction.events"))
+        .withColumn("event", F.explode("instruction.events")) # use `explode_outer` is you want ixs without events
         .select(
             "signature",
             "event.name",
             "event.event.margin_account",
-            F.col("event.event.index").cast("smallint"),
+            F.col("event.event.index").cast("smallint").alias("index"),
             (F.col("event.event.size").cast("decimal") / SIZE_FACTOR).alias("size"),
             (F.col("event.event.cost_of_trades").cast("decimal") / PRICE_FACTOR).alias("cost_of_trades"),
-            F.col("event.event.is_bid").cast("boolean"),
+            F.col("event.event.is_bid").cast("boolean").alias("is_bid"),
             "event.event.client_order_id",
             "event.event.order_id",
             F.col("instruction.accounts.named").alias("accounts"),
-            "slot"
+            "slot",
+            "block_time"
         )
 )
+display(trade_event_df)
 
 # COMMAND ----------
 
