@@ -63,16 +63,16 @@ instructions array<
         >
     >
 >,
-block_time timestamp,
-slot bigint,
 is_successful boolean,
+slot bigint,
+block_time timestamp,
 year string,
 month string,
 day string,
 hour string
 """
 
-df = spark.read.schema(transactions_schema).json("/mnt/zetadex-mainnet-landing/transactions-geyser/data/year=2022/month=07/day=07/hour=10/PUT-S3-zetadex-mainnet-transactions-geyser-4-2022-07-07-10-18-39-998002df-5c61-4c6c-bb1a-f24eeebfa061.gz")
+df = spark.read.schema(transactions_schema).json("/mnt/zetadex-mainnet-landing/transactions-geyser/data")
 
 # COMMAND ----------
 
@@ -199,7 +199,7 @@ position_movement_df = (df.filter("is_successful")
             "signature",
             "instruction.name",
             "instruction.args.movement_type",
-            "instruction.args.movements" # need to parse this https://github.com/zetamarkets/zeta-options/blob/a273907e8d6e4fb44fc2c05c5e149d66e89b08cc/zeta/programs/zeta/src/context.rs#L1280-L1284
+            "instruction.args.movements", # need to parse this https://github.com/zetamarkets/zeta-options/blob/a273907e8d6e4fb44fc2c05c5e149d66e89b08cc/zeta/programs/zeta/src/context.rs#L1280-L1284
             (F.col("event.event.net_balance_transfer").cast("decimal") / PRICE_FACTOR).alias("net_balance_transfer"),
             (F.col("event.event.margin_account_balance").cast("decimal") / PRICE_FACTOR).alias("margin_account_balance"),
             (F.col("event.event.spread_account_balance").cast("decimal") / PRICE_FACTOR).alias("spread_account_balance"),
@@ -230,15 +230,15 @@ settle_positions_df = (df.filter("is_successful")
 trade_event_df = (df.filter("is_successful")
         .withColumn("instruction", F.explode("instructions"))
         .filter("instruction.name == 'crank_event_queue'")
-        .withColumn("event", F.explode("events"))
+        .withColumn("event", F.explode("instruction.events"))
         .select(
             "signature",
             "event.name",
             "event.event.margin_account",
-            F.col("event.event.index").cast("small"),
+            F.col("event.event.index").cast("smallint"),
             (F.col("event.event.size").cast("decimal") / SIZE_FACTOR).alias("size"),
             (F.col("event.event.cost_of_trades").cast("decimal") / PRICE_FACTOR).alias("cost_of_trades"),
-            F.col("event.event.is_bid").cast("bool"),
+            F.col("event.event.is_bid").cast("boolean"),
             "event.event.client_order_id",
             "event.event.order_id",
             F.col("instruction.accounts.named").alias("accounts"),
