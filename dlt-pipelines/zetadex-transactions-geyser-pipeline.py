@@ -107,7 +107,7 @@ deposit_df = (df.filter("is_successful")
         .select(
             "signature",
             "instruction.name",
-            (F.col("instruction.args.amount").cast("decimal") / PRICE_FACTOR).alias("amount"),
+            (F.col("instruction.args.amount") / PRICE_FACTOR).alias("amount"),
             F.col("instruction.accounts.named").alias("accounts"),
             "slot",
             "block_time"
@@ -124,7 +124,7 @@ withdraw_df = (df.filter("is_successful")
         .select(
             "signature",
             "instruction.name",
-            (F.col("instruction.args.amount").cast("decimal") / PRICE_FACTOR).alias("amount"),
+            (F.col("instruction.args.amount") / PRICE_FACTOR).alias("amount"),
             F.col("instruction.accounts.named").alias("accounts"),
             "slot",
             "block_time"
@@ -142,13 +142,13 @@ place_order_df = (df.filter("is_successful")
         .select(
             "signature",
             "instruction.name",
-            (F.col("instruction.args.price").cast("decimal") / PRICE_FACTOR).alias("price"),
-            (F.col("instruction.args.size").cast("decimal") / SIZE_FACTOR).alias("size"),
+            (F.col("instruction.args.price") / PRICE_FACTOR).alias("price"),
+            (F.col("instruction.args.size") / SIZE_FACTOR).alias("size"),
             "instruction.args.side",
             "instruction.args.order_type",
             "instruction.args.client_order_id",
-            (F.col("event.event.fee").cast("decimal") / PRICE_FACTOR).alias("fee"),
-            (F.col("event.event.oracle_price").cast("decimal") / PRICE_FACTOR).alias("oracle_price"),
+            (F.col("event.event.fee") / PRICE_FACTOR).alias("fee"),
+            (F.col("event.event.oracle_price") / PRICE_FACTOR).alias("oracle_price"),
             "event.event.order_id",
             F.col("instruction.accounts.named").alias("accounts"),
             "slot",
@@ -186,15 +186,15 @@ liquidate_df = (df.filter("is_successful")
         .select(
             "signature",
             "instruction.name",
-            (F.col("instruction.args.size").cast("decimal") / SIZE_FACTOR).alias("size"),
-            (F.col("event.event.liquidator_reward").cast("decimal") / PRICE_FACTOR).alias("liquidator_reward"),
-            (F.col("event.event.insurance_reward").cast("decimal") / PRICE_FACTOR).alias("insurance_reward"),
-            (F.col("event.event.cost_of_trades").cast("decimal") / PRICE_FACTOR).alias("cost_of_trades"),
-            (F.col("event.event.size").cast("decimal") / SIZE_FACTOR).alias("size"), # duplicate of the args?
-            (F.col("event.event.remaining_liquidatee_balance").cast("decimal") / PRICE_FACTOR).alias("remaining_liquidatee_balance"),
-            (F.col("event.event.remaining_liquidator_balance").cast("decimal") / PRICE_FACTOR).alias("remaining_liquidator_balance"),
-            (F.col("event.event.mark_price").cast("decimal") / PRICE_FACTOR).alias("mark_price"),
-            (F.col("event.event.underlying_price").cast("decimal") / PRICE_FACTOR).alias("underlying_price"),
+            (F.col("instruction.args.size") / SIZE_FACTOR).alias("size"),
+            (F.col("event.event.liquidator_reward") / PRICE_FACTOR).alias("liquidator_reward"),
+            (F.col("event.event.insurance_reward") / PRICE_FACTOR).alias("insurance_reward"),
+            (F.col("event.event.cost_of_trades") / PRICE_FACTOR).alias("cost_of_trades"),
+            (F.col("event.event.size") / SIZE_FACTOR).alias("size"), # duplicate of the args?
+            (F.col("event.event.remaining_liquidatee_balance") / PRICE_FACTOR).alias("remaining_liquidatee_balance"),
+            (F.col("event.event.remaining_liquidator_balance") / PRICE_FACTOR).alias("remaining_liquidator_balance"),
+            (F.col("event.event.mark_price") / PRICE_FACTOR).alias("mark_price"),
+            (F.col("event.event.underlying_price") / PRICE_FACTOR).alias("underlying_price"),
             F.col("instruction.accounts.named").alias("accounts"),
             "slot",
             "block_time"
@@ -214,10 +214,10 @@ position_movement_df = (df.filter("is_successful")
             "instruction.name",
             "instruction.args.movement_type",
             "instruction.args.movements", # need to parse this https://github.com/zetamarkets/zeta-options/blob/a273907e8d6e4fb44fc2c05c5e149d66e89b08cc/zeta/programs/zeta/src/context.rs#L1280-L1284
-            (F.col("event.event.net_balance_transfer").cast("decimal") / PRICE_FACTOR).alias("net_balance_transfer"),
-            (F.col("event.event.margin_account_balance").cast("decimal") / PRICE_FACTOR).alias("margin_account_balance"),
-            (F.col("event.event.spread_account_balance").cast("decimal") / PRICE_FACTOR).alias("spread_account_balance"),
-            (F.col("event.event.movement_fees").cast("decimal") / PRICE_FACTOR).alias("movement_fees"),
+            (F.col("event.event.net_balance_transfer") / PRICE_FACTOR).alias("net_balance_transfer"),
+            (F.col("event.event.margin_account_balance") / PRICE_FACTOR).alias("margin_account_balance"),
+            (F.col("event.event.spread_account_balance") / PRICE_FACTOR).alias("spread_account_balance"),
+            (F.col("event.event.movement_fees") / PRICE_FACTOR).alias("movement_fees"),
             F.col("instruction.accounts.named").alias("accounts"),
             "slot",
             "block_time"
@@ -234,7 +234,7 @@ settle_positions_df = (df.filter("is_successful")
         .select(
             "signature",
             "instruction.name",
-            F.col("instruction.args.expiry_ts").cast("timestamp").alias("expiry_ts"),
+            F.col("instruction.args.expiry_ts").cast("long").cast("timestamp").alias("expiry_ts"),
             F.col("instruction.accounts.named").alias("accounts"),
             "slot",
             "block_time"
@@ -253,9 +253,9 @@ trade_event_df = (df.filter("is_successful")
             "signature",
             "event.name",
             "event.event.margin_account",
-            ((F.col("event.event.cost_of_trades").cast("decimal") / F.col("event.event.size").cast("decimal")) / (PRICE_FACTOR/SIZE_FACTOR)).alias("price"),
-            (F.col("event.event.size").cast("decimal") / SIZE_FACTOR).alias("size"),
-#             (F.col("event.event.cost_of_trades").cast("decimal") / PRICE_FACTOR).alias("cost_of_trades"),
+            ((F.col("event.event.cost_of_trades") / F.col("event.event.size")) / (PRICE_FACTOR/SIZE_FACTOR)).alias("price"),
+            (F.col("event.event.size") / SIZE_FACTOR).alias("size"),
+#             (F.col("event.event.cost_of_trades") / PRICE_FACTOR).alias("cost_of_trades"),
             F.when(F.col("event.event.is_bid").cast("boolean"), "bid").otherwise("ask").alias("side"),
             F.col("event.event.index").cast("smallint").alias("market_index"),
             "event.event.client_order_id",
