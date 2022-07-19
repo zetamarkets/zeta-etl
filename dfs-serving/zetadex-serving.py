@@ -78,7 +78,7 @@ fs.publish_table(
 
 # COMMAND ----------
 
-# DBTITLE 1,zetadex_feature_store.agg_trades_24h_rolling_df
+# DBTITLE 1,zetadex_feature_store.agg_trades_24h_rolling_df (BTC+SOL)
 # On the fly transformation to get the last 24hrs volume from our 1h agg'ed tables
 agg_trades_24h_rolling_df = \
     (spark.table("zetadex_mainnet.agg_trades_1h")
@@ -116,19 +116,128 @@ fs.publish_table(
 
 # COMMAND ----------
 
+# DBTITLE 1,zetadex_feature_store.agg_trades_24h_rolling_df (SOL)
+# On the fly transformation to get the last 24hrs volume from our 1h agg'ed tables
+agg_trades_24h_rolling_df_sol = \
+    (spark.table("zetadex_mainnet.agg_trades_market_1h")
+     .filter(F.col("timestamp_window.start") >= (F.date_trunc("hour", F.current_timestamp()) - F.expr('INTERVAL 24 HOUR')))
+     .filter(F.col("underlying") == "SOL")
+     .agg(
+         F.sum("trades_count").alias("trades_count"),
+         F.sum("volume").alias("volume"),
+         F.sum("notional_volume").alias("notional_volume"),
+         F.sum("premium_sum").alias("premium_sum"),
+      )
+      .withColumn("timestamp", F.date_trunc("hour", F.current_timestamp()))
+      .withColumn("date_", F.to_date("timestamp"))
+      .withColumn("hour_", F.date_format("timestamp", "HH").cast("int"))
+     )
+agg_trades_24h_rolling_df_sol.show()
+
+# fs.create_table(
+#     name='zetadex_feature_store.agg_trades_24h_rolling_sol',
+#     primary_keys=["timestamp"],
+#     df=agg_trades_24h_rolling_df_sol,
+#     partition_columns="date_",
+#     description="Rolling 24hr trade summary metrics",
+# )
+
+# Write new results to table
+fs.write_table(
+  name='zetadex_feature_store.agg_trades_24h_rolling_sol',
+  df=agg_trades_24h_rolling_df_sol,
+  mode="merge",
+)
+
+fs.publish_table(
+  name='zetadex_feature_store.agg_trades_24h_rolling_sol',
+  online_store=online_store,
+#   filter_condition=f"date_ = '{current_date}' and hour_ = '{current_hour}'",
+  features=[
+    'trades_count',
+    'volume',
+    'notional_volume',
+    'premium_sum',
+    'timestamp'],
+  mode='merge'
+)
+
+# COMMAND ----------
+
+# DBTITLE 1,zetadex_feature_store.agg_trades_24h_rolling_df (BTC)
+# On the fly transformation to get the last 24hrs volume from our 1h agg'ed tables
+agg_trades_24h_rolling_df_btc = \
+    (spark.table("zetadex_mainnet.agg_trades_market_1h")
+     .filter(F.col("timestamp_window.start") >= (F.date_trunc("hour", F.current_timestamp()) - F.expr('INTERVAL 24 HOUR')))
+     .filter(F.col("underlying") == "BTC")
+     .agg(
+         F.sum("trades_count").alias("trades_count"),
+         F.sum("volume").alias("volume"),
+         F.sum("notional_volume").alias("notional_volume"),
+         F.sum("premium_sum").alias("premium_sum"),
+      )
+      .withColumn("timestamp", F.date_trunc("hour", F.current_timestamp()))
+      .withColumn("date_", F.to_date("timestamp"))
+      .withColumn("hour_", F.date_format("timestamp", "HH").cast("int"))
+     )
+agg_trades_24h_rolling_df_btc.show()
+
+# fs.create_table(
+#     name='zetadex_feature_store.agg_trades_24h_rolling_btc',
+#     primary_keys=["timestamp"],
+#     df=agg_trades_24h_rolling_df_btc,
+#     partition_columns="date_",
+#     description="Rolling 24hr trade summary metrics",
+# )
+
+# Write new results to table
+fs.write_table(
+  name='zetadex_feature_store.agg_trades_24h_rolling_btc',
+  df=agg_trades_24h_rolling_df_btc,
+  mode="merge",
+)
+
+fs.publish_table(
+  name='zetadex_feature_store.agg_trades_24h_rolling_btc',
+  online_store=online_store,
+#   filter_condition=f"date_ = '{current_date}' and hour_ = '{current_hour}'",
+  features=[
+    'trades_count',
+    'volume',
+    'notional_volume',
+    'premium_sum',
+    'timestamp'],
+  mode='merge'
+)
+
+# COMMAND ----------
+
 # DBTITLE 1,zetadex_feature_store.agg_prices_market_oi
 row1 = (spark.table("zetadex_mainnet.agg_prices_market_1h").agg({"timestamp": "max"}).collect())[0]
 print(row1["max(timestamp)"])
 agg_prices_market_total_df = \
 (spark.table("zetadex_mainnet.agg_prices_market_1h").filter(F.col("timestamp") == row1["max(timestamp)"]).groupBy().sum("open_interest", "open_interest_usd").drop("sum(strike)", "sum(theo)", "sum(delta)", "sum(vega)", "sum(sigma)", "sum(hour_)").withColumn("timestamp", F.lit(row1["max(timestamp)"])).withColumnRenamed("sum(open_interest)", "total_open_interest").withColumnRenamed("sum(open_interest_usd)", "total_open_interest_usd"))
+
+agg_prices_market_total_puts = \
+(spark.table("zetadex_mainnet.agg_prices_market_1h").filter(F.col("timestamp") == row1["max(timestamp)"]).filter(F.col("kind") == "put").groupBy().sum("open_interest", "open_interest_usd").drop("sum(strike)", "sum(theo)", "sum(delta)", "sum(vega)", "sum(sigma)", "sum(hour_)").withColumn("timestamp", F.lit(row1["max(timestamp)"])).withColumnRenamed("sum(open_interest)", "total_open_interest").withColumnRenamed("sum(open_interest_usd)", "total_open_interest_usd"))
+
+agg_prices_market_total_calls = \
+(spark.table("zetadex_mainnet.agg_prices_market_1h").filter(F.col("timestamp") == row1["max(timestamp)"]).filter(F.col("kind") == "call").groupBy().sum("open_interest", "open_interest_usd").drop("sum(strike)", "sum(theo)", "sum(delta)", "sum(vega)", "sum(sigma)", "sum(hour_)").withColumn("timestamp", F.lit(row1["max(timestamp)"])).withColumnRenamed("sum(open_interest)", "total_open_interest").withColumnRenamed("sum(open_interest_usd)", "total_open_interest_usd"))
+
+put_call_ratio = agg_prices_market_total_puts.collect()[0]['total_open_interest'] / agg_prices_market_total_calls.collect()[0]['total_open_interest']
+print(put_call_ratio)
+# agg_prices_market_total_puts.show()
+# agg_prices_market_total_calls.show()
+
+agg_prices_market_total_df = agg_prices_market_total_df.withColumn("put_call_ratio", F.lit(put_call_ratio))
 agg_prices_market_total_df.show()
 
-# fs.create_table(
-#     name='zetadex_feature_store.agg_prices_market_oi',
-#     primary_keys="timestamp",
-#     df=agg_prices_market_total_df,
-#     description="Aggregated total open interest",
-# )
+fs.create_table(
+    name='zetadex_feature_store.agg_prices_market_oi',
+    primary_keys="timestamp",
+    df=agg_prices_market_total_df,
+    description="Aggregated total open interest",
+)
 
 # Write new results to table
 fs.write_table(
