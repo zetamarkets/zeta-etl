@@ -45,6 +45,38 @@ BASE_PATH_TRANSFORMED = join("/mnt", S3_BUCKET_TRANSFORMED)
 
 # COMMAND ----------
 
+# transactions_schema = """
+# signature string,
+# instructions array<
+#     struct<
+#         name string,
+#         args map<string,string>,
+#         accounts struct<
+#             named map<string, string>,
+#             remaining array<string>
+#         >,
+#         events array<
+#             struct<
+#                 name string,
+#                 event map<string,string>
+#             >
+#         >
+#     >
+# >,
+# is_successful boolean,
+# slot bigint,
+# block_time timestamp,
+# year string,
+# month string,
+# day string,
+# hour string
+# """
+
+# df = spark.read.schema(transactions_schema).json("/mnt/zetadex-mainnet-landing/transactions-geyser/data")
+
+# COMMAND ----------
+
+# DBTITLE 1,Bronze
 transactions_schema = """
 signature string,
 instructions array<
@@ -72,200 +104,566 @@ day string,
 hour string
 """
 
-df = spark.read.schema(transactions_schema).json("/mnt/zetadex-mainnet-landing/transactions-geyser/data")
+@dlt.table(
+    comment="Raw data for platform transactions",
+    table_properties={
+        "quality":"bronze", 
+    },
+    path=join(BASE_PATH_TRANSFORMED,TRANSACTIONS_TABLE,"raw"),
+    schema=transactions_schema
+)
+def raw_transactions_geyser():
+    return (spark
+           .readStream
+           .format("cloudFiles")
+           .option("cloudFiles.format", "json")
+           .option("cloudFiles.region", "ap-southeast-1")
+           .option("cloudFiles.includeExistingFiles", True)
+           .option("cloudFiles.useNotifications", True)
+           .option("partitionColumns", "year,month,day,hour")
+           .schema(transactions_schema)
+           .load(join(BASE_PATH_LANDED,TRANSACTIONS_TABLE,"data"))
+          )
 
 # COMMAND ----------
 
-df.select("block_time").select(F.min("block_time"), F.max("block_time")).show()
+# DBTITLE 1,Silver
+@dlt.view
+def zetagroup_mapping():
+    return spark.table(f"zetadex_{NETWORK}.zetagroup_mapping")
+
+@dlt.view
+def cleaned_markets():
+    return spark.table(f"zetadex_{NETWORK}.cleaned_markets")
+
+# Transactions
+@dlt.table(
+    comment="Cleaned data for platform transactions",
+    table_properties={
+        "quality":"silver", 
+        "pipelines.autoOptimize.zOrderCols":"timestamp"
+    },
+    partition_cols=["date_"],
+    path=join(BASE_PATH_TRANSFORMED,TRANSACTIONS_TABLE,"cleaned-transactions")
+)
+def cleaned_transactions_geyser():
+    return (dlt.read_stream("raw_transactions_geyser")
+           .withWatermark("block_time", "1 hour")
+           .dropDuplicates(["signature"])
+           .filter("is_successful")
+           .drop("year", "month", "day", "hour")
+           .withColumn("date_", F.to_date("block_time"))
+           .withColumn("hour_", F.date_format("block_time", "HH").cast("int"))
+          )
+    
+# Deposits
+@dlt.table(
+    comment="Cleaned data for deposit instructions",
+    table_properties={
+        "quality":"silver", 
+        "pipelines.autoOptimize.zOrderCols":"timestamp"
+    },
+    partition_cols=["date_", "underlying"],
+    path=join(BASE_PATH_TRANSFORMED,TRANSACTIONS_TABLE,"cleaned-ix-deposit")
+)
+def cleaned_ix_deposit_geyser():
+    zetagroup_mapping_df = dlt.read("zetagroup_mapping")
+    return (dlt.read_stream("cleaned_transactions_geyser")
+           .withWatermark("block_time", "1 hour")
+           .select("*", F.posexplode("instructions").alias("instruction_index", "instruction"))
+           .filter(f"instruction.name == 'deposit'")
+           .join(zetagroup_mapping_df, 
+                 (F.col("instruction.accounts.zeta_group") == zetagroup_mapping_df.zetagroup_pub_key),
+                 how="left"
+                )
+           .select("signature",
+                   "instruction_index",
+                   "instruction.name",
+                   (F.col("instruction.args.amount") / PRICE_FACTOR).alias("deposit_amount"),
+                   F.col("instruction.accounts.named").alias("accounts"),
+                   "underlying",
+                   "block_time",
+                   "slot"
+                  )
+           .withColumn("date_", F.to_date("block_time"))
+           .withColumn("hour_", F.date_format("block_time", "HH").cast("int"))
+          )
+    
+# Withdraw
+@dlt.table(
+    comment="Cleaned data for withdraw instructions",
+    table_properties={
+        "quality":"silver", 
+        "pipelines.autoOptimize.zOrderCols":"timestamp"
+    },
+    partition_cols=["date_", "underlying"],
+    path=join(BASE_PATH_TRANSFORMED,TRANSACTIONS_TABLE,"cleaned-ix-withdraw")
+)
+def cleaned_ix_withdraw_geyser():
+    zetagroup_mapping_df = dlt.read("zetagroup_mapping")
+    return (dlt.read_stream("cleaned_transactions_geyser")
+       .withWatermark("block_time", "1 hour")
+       .select("*", F.posexplode("instructions").alias("instruction_index", "instruction"))
+       .filter(f"instruction.name == 'withdraw'")
+       .join(zetagroup_mapping_df, 
+             (F.col("instruction.accounts.zeta_group") == zetagroup_mapping_df.zetagroup_pub_key),
+             how="left"
+            )
+       .select("signature",
+               "instruction_index",
+               "instruction.name",
+               (F.col("instruction.args.amount") / PRICE_FACTOR).alias("withdraw_amount"),
+               F.col("instruction.accounts.named").alias("accounts"),
+               "underlying",
+               "block_time",
+               "slot"
+              )
+       .withColumn("date_", F.to_date("block_time"))
+       .withColumn("hour_", F.date_format("block_time", "HH").cast("int"))
+      )
+    
+# Place order
+@dlt.table(
+    comment="Cleaned data for placeOrder type instructions",
+    table_properties={
+        "quality":"silver", 
+        "pipelines.autoOptimize.zOrderCols":"timestamp"
+    },
+    partition_cols=["date_", "underlying"],
+    path=join(BASE_PATH_TRANSFORMED,TRANSACTIONS_TABLE,"cleaned-ix-place-order")
+)
+def cleaned_ix_place_order_geyser():
+    markets_df = dlt.read("cleaned_markets")
+    return (dlt.read_stream("cleaned_transactions_geyser")
+           .withWatermark("block_time", "1 hour")
+           .select("*", F.posexplode("instructions").alias("instruction_index", "instruction"))
+           .filter(F.col("instruction.name").startswith('place_order'))
+           .withColumn("event", F.col("instruction.events")[0])
+           .join(markets_df, 
+                 (F.col("instruction.accounts.market") == markets_df.market_pub_key)
+                  & F.col("block_time").between(markets_df.active_timestamp, markets_df.expiry_timestamp),
+                 how="left"
+                )
+           .select("signature",
+                   "instruction_index",
+                   "underlying",
+                   F.col("expiry_timestamp").alias("expiry"),
+                   "strike",
+                   "kind",
+                   "instruction.name",
+                   (F.col("instruction.args.price") / PRICE_FACTOR).alias("price"),
+                   (F.col("instruction.args.size") / SIZE_FACTOR).alias("size"),
+                   "instruction.args.side",
+                   "instruction.args.order_type",
+                   "instruction.args.client_order_id",
+                   "instruction.args.tag",
+                   (F.col("event.event.fee") / PRICE_FACTOR).alias("trading_fee"),
+                   (F.col("event.event.oracle_price") / PRICE_FACTOR).alias("oracle_price"),
+                   "event.event.order_id",
+                   F.col("instruction.accounts.named").alias("accounts"),
+                   "block_time",
+                   "slot"
+                  )
+           .withColumn("date_", F.to_date("block_time"))
+           .withColumn("hour_", F.date_format("block_time", "HH").cast("int"))
+            )
+    
+# Cancel order
+@dlt.table(
+    comment="Cleaned data for cancelOrder type instructions",
+    table_properties={
+        "quality":"silver", 
+        "pipelines.autoOptimize.zOrderCols":"timestamp"
+    },
+    partition_cols=["date_", "underlying"],
+    path=join(BASE_PATH_TRANSFORMED,TRANSACTIONS_TABLE,"cleaned-ix-cancel-order")
+)
+def cleaned_ix_cancel_order_geyser():
+    markets_df = dlt.read("cleaned_markets")
+    return (dlt.read_stream("cleaned_transactions_geyser")
+           .withWatermark("block_time", "1 hour")
+           .select("*", F.posexplode("instructions").alias("instruction_index", "instruction"))
+           .filter(F.col("instruction.name").contains("cancel_order"))
+           .join(markets_df, 
+                 (F.col("instruction.accounts.market") == markets_df.market_pub_key)
+                  & F.col("block_time").between(markets_df.active_timestamp, markets_df.expiry_timestamp),
+                 how="left"
+                )
+           .select("signature",
+                   "instruction_index",
+                   "underlying",
+                   F.col("expiry_timestamp").alias("expiry"),
+                   "strike",
+                   "kind",
+                   "instruction.name",
+                   "instruction.args.side",
+                   "instruction.args.order_id",
+                   "instruction.args.client_order_id",
+                   F.col("instruction.accounts.named").alias("accounts"),
+                   "block_time",
+                   "slot"
+                  )
+           .withColumn("date_", F.to_date("block_time"))
+           .withColumn("hour_", F.date_format("block_time", "HH").cast("int"))
+           )
+    
+# Liquidate
+@dlt.table(
+    comment="Cleaned data for liquidate instructions",
+    table_properties={
+        "quality":"silver", 
+        "pipelines.autoOptimize.zOrderCols":"timestamp"
+    },
+    partition_cols=["date_", "underlying"],
+    path=join(BASE_PATH_TRANSFORMED,TRANSACTIONS_TABLE,"cleaned-ix-liquidate")
+)
+def cleaned_ix_liquidate_geyser():
+    markets_df = dlt.read("cleaned_markets")
+    return (dlt.read_stream("cleaned_transactions_geyser")
+           .withWatermark("block_time", "1 hour")
+           .select("*", F.posexplode("instructions").alias("instruction_index", "instruction"))
+           .filter("instruction.name == 'liquidate'")
+           .withColumn("event", F.col("instruction.events")[0])
+           .join(markets_df, (F.col("instruction.accounts.market") == markets_df.market_pub_key)
+                & F.col("block_time").between(markets_df.active_timestamp, markets_df.expiry_timestamp) )
+           .select("signature",
+                   "instruction_index",
+                   "underlying",
+                   F.col("expiry_timestamp").alias("expiry"),
+                   "strike",
+                   "kind",
+                   "instruction.name",
+                   (F.col("instruction.args.size") / SIZE_FACTOR).alias("size"),
+                   (F.col("event.event.liquidator_reward") / PRICE_FACTOR).alias("liquidator_reward"),
+                   (F.col("event.event.insurance_reward") / PRICE_FACTOR).alias("insurance_reward"),
+                   (F.col("event.event.cost_of_trades") / PRICE_FACTOR).alias("cost_of_trades"),
+                   (F.col("event.event.size") / SIZE_FACTOR).alias("size"), # duplicate of the args?
+                   (F.col("event.event.remaining_liquidatee_balance") / PRICE_FACTOR).alias("remaining_liquidatee_balance"),
+                   (F.col("event.event.remaining_liquidator_balance") / PRICE_FACTOR).alias("remaining_liquidator_balance"),
+                   (F.col("event.event.mark_price") / PRICE_FACTOR).alias("mark_price"),
+                   (F.col("event.event.underlying_price") / PRICE_FACTOR).alias("underlying_price"),
+                   F.col("instruction.accounts.named").alias("accounts"),
+                   "block_time",
+                   "slot"
+                  )
+           .withColumn("date_", F.to_date("block_time"))
+           .withColumn("hour_", F.date_format("block_time", "HH").cast("int"))
+           )
+
+# Trades
+@dlt.table(
+    comment="Cleaned data for trades",
+    table_properties={
+        "quality":"silver", 
+        "pipelines.autoOptimize.zOrderCols":"timestamp"
+    },
+    partition_cols=["date_", "underlying"],
+    path=join(BASE_PATH_TRANSFORMED,TRANSACTIONS_TABLE,"cleaned-ix-trade")
+)
+def cleaned_ix_trade_geyser():
+    markets_df = dlt.read("cleaned_markets")
+    return (dlt.read_stream("cleaned_transactions_geyser")
+           .withWatermark("block_time", "1 hour")
+           .select("*", F.posexplode("instructions").alias("instruction_index", "instruction"))
+           .filter("instruction.name == 'crank_event_queue'")
+           .withColumn("event", F.explode("instruction.events"))
+           .join(markets_df, 
+                 (F.col("instruction.accounts.market") == markets_df.market_pub_key)
+                  & F.col("block_time").between(markets_df.active_timestamp, markets_df.expiry_timestamp),
+                 how="left"
+                )
+           .select("signature",
+                   "instruction_index",
+                   "underlying",
+                   F.col("expiry_timestamp").alias("expiry"),
+                   "strike",
+                   "kind",
+                   "event.name",
+                   "event.event.margin_account",
+                   ((F.col("event.event.cost_of_trades") / F.col("event.event.size")) / (PRICE_FACTOR/SIZE_FACTOR)).alias("price"),
+                   (F.col("event.event.size") / SIZE_FACTOR).alias("size"),
+        #            (F.col("event.event.cost_of_trades") / PRICE_FACTOR).alias("cost_of_trades"),
+                   F.when(F.col("event.event.is_bid").cast("boolean"), "bid").otherwise("ask").alias("side"),
+                   F.col("event.event.index").cast("smallint").alias("market_index"),
+                   "event.event.client_order_id",
+                   "event.event.order_id",
+                   F.col("instruction.accounts.named").alias("accounts"),
+                   "block_time",
+                   "slot"
+                  )
+           .withColumn("date_", F.to_date("block_time"))
+           .withColumn("hour_", F.date_format("block_time", "HH").cast("int"))
+            )
+
+# Position Movement
+@dlt.table(
+    comment="Cleaned data for position movement instructions (strategy accounts)",
+    table_properties={
+        "quality":"silver", 
+        "pipelines.autoOptimize.zOrderCols":"timestamp"
+    },
+    partition_cols=["date_", "underlying"],
+    path=join(BASE_PATH_TRANSFORMED,TRANSACTIONS_TABLE,"cleaned-ix-position-movement")
+)
+def cleaned_ix_position_movement_geyser():
+    zetagroup_mapping_df = dlt.read("zetagroup_mapping")
+    return (dlt.read_stream("cleaned_transactions_geyser")
+           .withWatermark("block_time", "1 hour")
+           .select("*", F.posexplode("instructions").alias("instruction_index", "instruction"))
+           .filter("instruction.name == 'position_movement'")
+           .withColumn("event", F.col("instruction.events")[0])
+           .join(zetagroup_mapping_df, 
+             (F.col("instruction.accounts.zeta_group") == zetagroup_mapping_df.zetagroup_pub_key),
+             how="left"
+            )
+           .select("signature",
+                   "instruction_index",
+                   "underlying",
+                   "instruction.name",
+                   "instruction.args.movement_type",
+                   "instruction.args.movements", # need to parse this https://github.com/zetamarkets/zeta-options/blob/a273907e8d6e4fb44fc2c05c5e149d66e89b08cc/zeta/programs/zeta/src/context.rs#L1280-L1284
+                   (F.col("event.event.net_balance_transfer") / PRICE_FACTOR).alias("net_balance_transfer"),
+                   (F.col("event.event.margin_account_balance") / PRICE_FACTOR).alias("margin_account_balance"),
+                   (F.col("event.event.spread_account_balance") / PRICE_FACTOR).alias("spread_account_balance"),
+                   (F.col("event.event.movement_fees") / PRICE_FACTOR).alias("movement_fees"),
+                   F.col("instruction.accounts.named").alias("accounts"),
+                   "block_time",
+                   "slot"
+                  )
+           .withColumn("date_", F.to_date("block_time"))
+           .withColumn("hour_", F.date_format("block_time", "HH").cast("int"))
+           )
+
+# Settle Positions
+@dlt.table(
+    comment="Cleaned data for position settlement",
+    table_properties={
+        "quality":"silver", 
+        "pipelines.autoOptimize.zOrderCols":"timestamp"
+    },
+    partition_cols=["date_", "underlying"],
+    path=join(BASE_PATH_TRANSFORMED,TRANSACTIONS_TABLE,"cleaned-ix-settle-positions")
+)
+def cleaned_ix_settle_positions_geyser():
+    zetagroup_mapping_df = dlt.read("zetagroup_mapping")
+    return (dlt.read_stream("cleaned_transactions_geyser")
+           .withWatermark("block_time", "1 hour")
+           .select("*", F.posexplode("instructions").alias("instruction_index", "instruction"))
+           .filter("instruction.name == 'settle_positions'")
+           .withColumn("event", F.explode("instruction.events"))
+           .join(zetagroup_mapping_df, 
+             (F.col("instruction.accounts.zeta_group") == zetagroup_mapping_df.zetagroup_pub_key),
+             how="left"
+            )
+           .select("signature",
+                   "instruction_index",
+                   "underlying",
+                   F.col("instruction.args.expiry_ts").cast("long").cast("timestamp").alias("expiry_ts"),
+                   F.col("instruction.accounts.named").alias("accounts"),
+                   "block_time",
+                   "slot"
+                  )
+           .withColumn("date_", F.to_date("block_time"))
+           .withColumn("hour_", F.date_format("block_time", "HH").cast("int"))
+            )
 
 # COMMAND ----------
 
-display(df)
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC 
-# MAGIC - ~~deposit~~
-# MAGIC - ~~withdraw~~
-# MAGIC - ~~place_order (v1,2,3)~~
-# MAGIC - ~~cancel_order (cancelOrder, cancelOrderHalted, cancelOrderByClientOrderId, cancelExpiredOrder, cancelOrderNoError, cancelOrderByClientOrderIdNoError, forceCancelOrders)~~
-# MAGIC - ~~liquidate~~
-# MAGIC - ~~positionMovement~~
-# MAGIC - ~~settlePosition~~
-# MAGIC - ~~crankEventQueue (for trade events)~~
-# MAGIC 
-# MAGIC I think java `long`s are 8 byte signed a.k.a 32 bit unsigned equivalent (so comparable to u32 in rust). For u64, u128 we should probably just use strings.
-# MAGIC https://spark.apache.org/docs/latest/sql-ref-datatypes.html
+# MAGIC %md 
+# MAGIC # Legacy ETL
 
 # COMMAND ----------
 
 # DBTITLE 1,Deposit
-deposit_df = (df.filter("is_successful")
-        .withColumn("instruction", F.explode("instructions"))
-        .filter("instruction.name == 'deposit'")
-        .select(
-            "signature",
-            "instruction.name",
-            (F.col("instruction.args.amount") / PRICE_FACTOR).alias("amount"),
-            F.col("instruction.accounts.named").alias("accounts"),
-            "slot",
-            "block_time"
-        )
-)
-display(deposit_df)
+# deposit_df = (df.filter("is_successful")
+#         .withColumn("instruction", F.explode("instructions"))
+#         .filter("instruction.name == 'deposit'")
+#         .select(
+#             "signature",
+#             "instruction.name",
+#             (F.col("instruction.args.amount") / PRICE_FACTOR).alias("amount"),
+#             F.col("instruction.accounts.named").alias("accounts"),
+#             "slot",
+#             "block_time"
+#         )
+# )
+# display(deposit_df)
 
 # COMMAND ----------
 
 # DBTITLE 1,Withdraw
-withdraw_df = (df.filter("is_successful")
-        .withColumn("instruction", F.explode("instructions"))
-        .filter("instruction.name == 'withdraw'")
-        .select(
-            "signature",
-            "instruction.name",
-            (F.col("instruction.args.amount") / PRICE_FACTOR).alias("amount"),
-            F.col("instruction.accounts.named").alias("accounts"),
-            "slot",
-            "block_time"
-        )
-)
-display(withdraw_df)
+# withdraw_df = (df.filter("is_successful")
+#         .withColumn("instruction", F.explode("instructions"))
+#         .filter("instruction.name == 'withdraw'")
+#         .select(
+#             "signature",
+#             "instruction.name",
+#             (F.col("instruction.args.amount") / PRICE_FACTOR).alias("amount"),
+#             F.col("instruction.accounts.named").alias("accounts"),
+#             "slot",
+#             "block_time"
+#         )
+# )
+# display(withdraw_df)
 
 # COMMAND ----------
 
 # DBTITLE 1,Place Order
-place_order_df = (df.filter("is_successful")
-        .withColumn("instruction", F.explode("instructions"))
-        .filter(F.col("instruction.name").startswith("place_order"))
-        .withColumn("event", F.col("instruction.events")[0])
-        .select(
-            "signature",
-            "instruction.name",
-            (F.col("instruction.args.price") / PRICE_FACTOR).alias("price"),
-            (F.col("instruction.args.size") / SIZE_FACTOR).alias("size"),
-            "instruction.args.side",
-            "instruction.args.order_type",
-            "instruction.args.client_order_id",
-            (F.col("event.event.fee") / PRICE_FACTOR).alias("fee"),
-            (F.col("event.event.oracle_price") / PRICE_FACTOR).alias("oracle_price"),
-            "event.event.order_id",
-            F.col("instruction.accounts.named").alias("accounts"),
-            "slot",
-            "block_time"
-        )
-)
-display(place_order_df)
+# place_order_df = (df.filter("is_successful")
+#         .withColumn("instruction", F.explode("instructions"))
+#         .filter(F.col("instruction.name").startswith("place_order"))
+#         .withColumn("event", F.col("instruction.events")[0])
+#         .select(
+#             "signature",
+#             "instruction.name",
+#             (F.col("instruction.args.price") / PRICE_FACTOR).alias("price"),
+#             (F.col("instruction.args.size") / SIZE_FACTOR).alias("size"),
+#             "instruction.args.side",
+#             "instruction.args.order_type",
+#             "instruction.args.client_order_id",
+#             (F.col("event.event.fee") / PRICE_FACTOR).alias("fee"),
+#             (F.col("event.event.oracle_price") / PRICE_FACTOR).alias("oracle_price"),
+#             "event.event.order_id",
+#             F.col("instruction.accounts.named").alias("accounts"),
+#             "slot",
+#             "block_time"
+#         )
+# )
+# display(place_order_df)
 
 # COMMAND ----------
 
 # DBTITLE 1,Cancel Order
-cancel_order_df = (df.filter("is_successful")
-        .withColumn("instruction", F.explode("instructions"))
-        .filter(F.col("instruction.name").contains("cancel_order"))
-        .select(
-            "signature",
-            "instruction.name",
-            "instruction.args.side",
-            "instruction.args.order_id",
-            "instruction.args.client_order_id",
-            F.col("instruction.accounts.named").alias("accounts"),
-            "slot",
-            "block_time"
-        )
-)
-display(cancel_order_df)
+# cancel_order_df = (df.filter("is_successful")
+#         .withColumn("instruction", F.explode("instructions"))
+#         .filter(F.col("instruction.name").contains("cancel_order"))
+#         .select(
+#             "signature",
+#             "instruction.name",
+#             "instruction.args.side",
+#             "instruction.args.order_id",
+#             "instruction.args.client_order_id",
+#             F.col("instruction.accounts.named").alias("accounts"),
+#             "slot",
+#             "block_time"
+#         )
+# )
+# display(cancel_order_df)
 
 # COMMAND ----------
 
 # DBTITLE 1,Liquidate
-liquidate_df = (df.filter("is_successful")
-        .withColumn("instruction", F.explode("instructions"))
-        .filter("instruction.name == 'liquidate'")
-        .withColumn("event", F.col("instruction.events")[0])
-        .select(
-            "signature",
-            "instruction.name",
-            (F.col("instruction.args.size") / SIZE_FACTOR).alias("size"),
-            (F.col("event.event.liquidator_reward") / PRICE_FACTOR).alias("liquidator_reward"),
-            (F.col("event.event.insurance_reward") / PRICE_FACTOR).alias("insurance_reward"),
-            (F.col("event.event.cost_of_trades") / PRICE_FACTOR).alias("cost_of_trades"),
-            (F.col("event.event.size") / SIZE_FACTOR).alias("size"), # duplicate of the args?
-            (F.col("event.event.remaining_liquidatee_balance") / PRICE_FACTOR).alias("remaining_liquidatee_balance"),
-            (F.col("event.event.remaining_liquidator_balance") / PRICE_FACTOR).alias("remaining_liquidator_balance"),
-            (F.col("event.event.mark_price") / PRICE_FACTOR).alias("mark_price"),
-            (F.col("event.event.underlying_price") / PRICE_FACTOR).alias("underlying_price"),
-            F.col("instruction.accounts.named").alias("accounts"),
-            "slot",
-            "block_time"
-        )
-)
-display(liquidate_df)
+# liquidate_df = (df.filter("is_successful")
+#         .withColumn("instruction", F.explode("instructions"))
+#         .filter("instruction.name == 'liquidate'")
+#         .withColumn("event", F.col("instruction.events")[0])
+#         .select(
+#             "signature",
+#             "instruction.name",
+#             (F.col("instruction.args.size") / SIZE_FACTOR).alias("size"),
+#             (F.col("event.event.liquidator_reward") / PRICE_FACTOR).alias("liquidator_reward"),
+#             (F.col("event.event.insurance_reward") / PRICE_FACTOR).alias("insurance_reward"),
+#             (F.col("event.event.cost_of_trades") / PRICE_FACTOR).alias("cost_of_trades"),
+#             (F.col("event.event.size") / SIZE_FACTOR).alias("size"), # duplicate of the args?
+#             (F.col("event.event.remaining_liquidatee_balance") / PRICE_FACTOR).alias("remaining_liquidatee_balance"),
+#             (F.col("event.event.remaining_liquidator_balance") / PRICE_FACTOR).alias("remaining_liquidator_balance"),
+#             (F.col("event.event.mark_price") / PRICE_FACTOR).alias("mark_price"),
+#             (F.col("event.event.underlying_price") / PRICE_FACTOR).alias("underlying_price"),
+#             F.col("instruction.accounts.named").alias("accounts"),
+#             "slot",
+#             "block_time"
+#         )
+# )
+# display(liquidate_df)
 
 # COMMAND ----------
 
 # DBTITLE 1,Position Movement
-position_movement_df = (df.filter("is_successful")
-        .withColumn("instruction", F.explode("instructions"))
-        .filter("instruction.name == 'position_movement'")
-        .withColumn("event", F.col("instruction.events")[0])
-        .select(
-            "signature",
-            "instruction.name",
-            "instruction.args.movement_type",
-            "instruction.args.movements", # need to parse this https://github.com/zetamarkets/zeta-options/blob/a273907e8d6e4fb44fc2c05c5e149d66e89b08cc/zeta/programs/zeta/src/context.rs#L1280-L1284
-            (F.col("event.event.net_balance_transfer") / PRICE_FACTOR).alias("net_balance_transfer"),
-            (F.col("event.event.margin_account_balance") / PRICE_FACTOR).alias("margin_account_balance"),
-            (F.col("event.event.spread_account_balance") / PRICE_FACTOR).alias("spread_account_balance"),
-            (F.col("event.event.movement_fees") / PRICE_FACTOR).alias("movement_fees"),
-            F.col("instruction.accounts.named").alias("accounts"),
-            "slot",
-            "block_time"
-        )
-)
-display(position_movement_df)
+# position_movement_df = (df.filter("is_successful")
+#         .withColumn("instruction", F.explode("instructions"))
+#         .filter("instruction.name == 'position_movement'")
+#         .withColumn("event", F.col("instruction.events")[0])
+#         .select(
+#             "signature",
+#             "instruction.name",
+#             "instruction.args.movement_type",
+#             "instruction.args.movements", # need to parse this https://github.com/zetamarkets/zeta-options/blob/a273907e8d6e4fb44fc2c05c5e149d66e89b08cc/zeta/programs/zeta/src/context.rs#L1280-L1284
+#             (F.col("event.event.net_balance_transfer") / PRICE_FACTOR).alias("net_balance_transfer"),
+#             (F.col("event.event.margin_account_balance") / PRICE_FACTOR).alias("margin_account_balance"),
+#             (F.col("event.event.spread_account_balance") / PRICE_FACTOR).alias("spread_account_balance"),
+#             (F.col("event.event.movement_fees") / PRICE_FACTOR).alias("movement_fees"),
+#             F.col("instruction.accounts.named").alias("accounts"),
+#             "slot",
+#             "block_time"
+#         )
+# )
+# display(position_movement_df)
 
 # COMMAND ----------
 
 # DBTITLE 1,Settle Positions
-settle_positions_df = (df.filter("is_successful")
-        .withColumn("instruction", F.explode("instructions"))
-        .filter("instruction.name == 'settle_positions'")
-        .select(
-            "signature",
-            "instruction.name",
-            F.col("instruction.args.expiry_ts").cast("long").cast("timestamp").alias("expiry_ts"),
-            F.col("instruction.accounts.named").alias("accounts"),
-            "slot",
-            "block_time"
-        )
-)
-display(settle_positions_df)
+# settle_positions_df = (df.filter("is_successful")
+#         .withColumn("instruction", F.explode("instructions"))
+#         .filter("instruction.name == 'settle_positions'")
+#         .select(
+#             "signature",
+#             "instruction.name",
+#             F.col("instruction.args.expiry_ts").cast("long").cast("timestamp").alias("expiry_ts"),
+#             F.col("instruction.accounts.named").alias("accounts"),
+#             "slot",
+#             "block_time"
+#         )
+# )
+# display(settle_positions_df)
 
 # COMMAND ----------
 
 # DBTITLE 1,Trade Event (Crank)
-trade_event_df = (df.filter("is_successful")
-        .withColumn("instruction", F.explode("instructions"))
-        .filter("instruction.name == 'crank_event_queue'")
-        .withColumn("event", F.explode("instruction.events")) # use `explode_outer` is you want ixs without events
-        .select(
-            "signature",
-            "event.name",
-            "event.event.margin_account",
-            ((F.col("event.event.cost_of_trades") / F.col("event.event.size")) / (PRICE_FACTOR/SIZE_FACTOR)).alias("price"),
-            (F.col("event.event.size") / SIZE_FACTOR).alias("size"),
-#             (F.col("event.event.cost_of_trades") / PRICE_FACTOR).alias("cost_of_trades"),
-            F.when(F.col("event.event.is_bid").cast("boolean"), "bid").otherwise("ask").alias("side"),
-            F.col("event.event.index").cast("smallint").alias("market_index"),
-            "event.event.client_order_id",
-            "event.event.order_id",
-            F.col("instruction.accounts.named").alias("accounts"),
-            "slot",
-            "block_time"
-        )
-)
-display(trade_event_df)
+# trade_event_df = (df.filter("is_successful")
+#         .withColumn("instruction", F.explode("instructions"))
+#         .filter("instruction.name == 'crank_event_queue'")
+#         .withColumn("event", F.explode("instruction.events")) # use `explode_outer` is you want ixs without events
+#         .select(
+#             "signature",
+#             "event.name",
+#             "event.event.margin_account",
+#             ((F.col("event.event.cost_of_trades") / F.col("event.event.size")) / (PRICE_FACTOR/SIZE_FACTOR)).alias("price"),
+#             (F.col("event.event.size") / SIZE_FACTOR).alias("size"),
+# #             (F.col("event.event.cost_of_trades") / PRICE_FACTOR).alias("cost_of_trades"),
+#             F.when(F.col("event.event.is_bid").cast("boolean"), "bid").otherwise("ask").alias("side"),
+#             F.col("event.event.index").cast("smallint").alias("market_index"),
+#             "event.event.client_order_id",
+#             "event.event.order_id",
+#             F.col("instruction.accounts.named").alias("accounts"),
+#             "slot",
+#             "block_time"
+#         )
+# )
+# display(trade_event_df)
+
+# COMMAND ----------
+
+# display(place_order_df.join(cancel_order_df, on = ["order_id"]))
+
+# COMMAND ----------
+
+# place_order_df.count()
+
+# COMMAND ----------
+
+# cancel_order_df.count()
+
+# COMMAND ----------
+
+# place_order_df.groupBy("name").count().orderBy("count").show()
+
+# COMMAND ----------
+
+# cancel_order_df.groupBy("name").count().orderBy("count").show()
+
+# COMMAND ----------
+
+# place_order_df.alias("p").join(cancel_order_df.alias("c"), on = ["order_id"]).groupBy("p.name","c.name").count().orderBy("count").show()
 
 # COMMAND ----------
 
