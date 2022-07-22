@@ -181,7 +181,7 @@ def cleaned_transactions():
            .withWatermark("block_timestamp", "1 hour")
            .dropDuplicates(["transaction_id"])
            .filter("is_successful")
-           .drop("instructions", "year", "month", "day", "hour")
+           .drop("year", "month", "day", "hour")
            .withColumn("date_", F.to_date("block_timestamp"))
            .withColumn("hour_", F.date_format("block_timestamp", "HH").cast("int"))
           )
@@ -198,10 +198,8 @@ def cleaned_transactions():
 )
 def cleaned_ix_deposit():
     zetagroup_mapping_df = dlt.read("zetagroup_mapping")
-    return (dlt.read_stream("raw_transactions")
+    return (dlt.read_stream("cleaned_transactions")
            .withWatermark("block_timestamp", "1 hour")
-           .dropDuplicates(["transaction_id"])
-           .filter("is_successful")
            .select("*", F.posexplode("instructions").alias("instruction_index", "instruction"))
            .filter(f"instruction.name == 'deposit'")
            .join(zetagroup_mapping_df, 
@@ -233,10 +231,8 @@ def cleaned_ix_deposit():
 )
 def cleaned_ix_withdraw():
     zetagroup_mapping_df = dlt.read("zetagroup_mapping")
-    return (dlt.read_stream("raw_transactions")
+    return (dlt.read_stream("cleaned_transactions")
            .withWatermark("block_timestamp", "1 hour")
-           .dropDuplicates(["transaction_id"])
-           .filter("is_successful")
            .select("*", F.posexplode("instructions").alias("instruction_index", "instruction"))
            .filter(f"instruction.name == 'withdraw'")
            .join(zetagroup_mapping_df, 
@@ -268,10 +264,8 @@ def cleaned_ix_withdraw():
 )
 def cleaned_ix_place_order():
     markets_df = dlt.read("cleaned_markets")
-    return (dlt.read_stream("raw_transactions")
+    return (dlt.read_stream("cleaned_transactions")
            .withWatermark("block_timestamp", "1 hour")
-           .dropDuplicates(["transaction_id"])
-           .filter("is_successful")
            .select("*", F.posexplode("instructions").alias("instruction_index", "instruction"))
            .filter(F.col("instruction.name").startswith('placeOrder'))
            .join(markets_df, 
@@ -316,10 +310,8 @@ def cleaned_ix_place_order():
 )
 def cleaned_ix_cancel_order():
     markets_df = dlt.read("cleaned_markets")
-    return (dlt.read_stream("raw_transactions")
+    return (dlt.read_stream("cleaned_transactions")
            .withWatermark("block_timestamp", "1 hour")
-           .dropDuplicates(["transaction_id"])
-           .filter("is_successful")
            .select("*", F.posexplode("instructions").alias("instruction_index", "instruction"))
            .filter("""
            instruction.name == 'cancelOrder'
@@ -362,10 +354,8 @@ def cleaned_ix_cancel_order():
 )
 def cleaned_ix_liquidate():
     markets_df = dlt.read("cleaned_markets")
-    return (dlt.read_stream("raw_transactions")
+    return (dlt.read_stream("cleaned_transactions")
            .withWatermark("block_timestamp", "1 hour")
-           .dropDuplicates(["transaction_id"])
-           .filter("is_successful")
            .select("*", F.posexplode("instructions").alias("instruction_index", "instruction"))
            .filter("instruction.name == 'liquidate'")
            .join(markets_df, (F.col("instruction.named_accounts.market") == markets_df.market_pub_key)
