@@ -285,6 +285,8 @@ def cleaned_ix_cancel_order_geyser():
            .withWatermark("block_time", "1 hour")
            .select("*", F.posexplode("instructions").alias("instruction_index", "instruction"))
            .filter(F.col("instruction.name").contains("cancel_order"))
+           .withColumn("event", F.explode("instruction.events"))
+           .filter("event.name == 'cancel_event'")
            .join(markets_df, 
                  (F.col("instruction.accounts.named.market") == markets_df.market_pub_key)
                   & F.col("block_time").between(markets_df.active_timestamp, markets_df.expiry_timestamp),
@@ -297,9 +299,13 @@ def cleaned_ix_cancel_order_geyser():
                    "strike",
                    "kind",
                    "instruction.name",
-                   "instruction.args.side",
-                   "instruction.args.order_id",
-                   "instruction.args.client_order_id",
+                   F.col("event.user").alias("user_pub_key"),
+                   F.upper("event.asset").alias("underlying"),
+                   "event.market_index",
+                   "event.side",
+                   "event.size",
+                   "event.order_id",
+                   "event.client_order_id",
                    F.col("instruction.accounts.named").alias("accounts"),
                    "block_time",
                    "slot"
