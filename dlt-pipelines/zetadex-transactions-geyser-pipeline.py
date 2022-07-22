@@ -173,7 +173,7 @@ def cleaned_ix_deposit_geyser():
            .select("*", F.posexplode("instructions").alias("instruction_index", "instruction"))
            .filter(f"instruction.name == 'deposit'")
            .join(zetagroup_mapping_df, 
-                 (F.col("instruction.accounts.zeta_group") == zetagroup_mapping_df.zetagroup_pub_key),
+                 (F.col("instruction.accounts.named.zeta_group") == zetagroup_mapping_df.zetagroup_pub_key),
                  how="left"
                 )
            .select("signature",
@@ -206,7 +206,7 @@ def cleaned_ix_withdraw_geyser():
        .select("*", F.posexplode("instructions").alias("instruction_index", "instruction"))
        .filter(f"instruction.name == 'withdraw'")
        .join(zetagroup_mapping_df, 
-             (F.col("instruction.accounts.zeta_group") == zetagroup_mapping_df.zetagroup_pub_key),
+             (F.col("instruction.accounts.named.zeta_group") == zetagroup_mapping_df.zetagroup_pub_key),
              how="left"
             )
        .select("signature",
@@ -238,9 +238,10 @@ def cleaned_ix_place_order_geyser():
            .withWatermark("block_time", "1 hour")
            .select("*", F.posexplode("instructions").alias("instruction_index", "instruction"))
            .filter(F.col("instruction.name").startswith('place_order'))
-           .withColumn("event", F.col("instruction.events")[0])
+           .withColumn("event", F.explode("instruction.events"))
+           .filter("event.name == 'place_order_event'")
            .join(markets_df, 
-                 (F.col("instruction.accounts.market") == markets_df.market_pub_key)
+                 (F.col("instruction.accounts.named.market") == markets_df.market_pub_key)
                   & F.col("block_time").between(markets_df.active_timestamp, markets_df.expiry_timestamp),
                  how="left"
                 )
@@ -285,7 +286,7 @@ def cleaned_ix_cancel_order_geyser():
            .select("*", F.posexplode("instructions").alias("instruction_index", "instruction"))
            .filter(F.col("instruction.name").contains("cancel_order"))
            .join(markets_df, 
-                 (F.col("instruction.accounts.market") == markets_df.market_pub_key)
+                 (F.col("instruction.accounts.named.market") == markets_df.market_pub_key)
                   & F.col("block_time").between(markets_df.active_timestamp, markets_df.expiry_timestamp),
                  how="left"
                 )
@@ -324,7 +325,7 @@ def cleaned_ix_liquidate_geyser():
            .select("*", F.posexplode("instructions").alias("instruction_index", "instruction"))
            .filter("instruction.name == 'liquidate'")
            .withColumn("event", F.col("instruction.events")[0])
-           .join(markets_df, (F.col("instruction.accounts.market") == markets_df.market_pub_key)
+           .join(markets_df, (F.col("instruction.accounts.named.market") == markets_df.market_pub_key)
                 & F.col("block_time").between(markets_df.active_timestamp, markets_df.expiry_timestamp) )
            .select("signature",
                    "instruction_index",
@@ -333,11 +334,11 @@ def cleaned_ix_liquidate_geyser():
                    "strike",
                    "kind",
                    "instruction.name",
-                   (F.col("instruction.args.size") / SIZE_FACTOR).alias("size"),
+                   (F.col("instruction.args.size") / SIZE_FACTOR).alias("desired_size"),
                    (F.col("event.event.liquidator_reward") / PRICE_FACTOR).alias("liquidator_reward"),
                    (F.col("event.event.insurance_reward") / PRICE_FACTOR).alias("insurance_reward"),
                    (F.col("event.event.cost_of_trades") / PRICE_FACTOR).alias("cost_of_trades"),
-                   (F.col("event.event.size") / SIZE_FACTOR).alias("size"), # duplicate of the args?
+                   (F.col("event.event.size") / SIZE_FACTOR).alias("liquidated_size"), # duplicate of the args?
                    (F.col("event.event.remaining_liquidatee_balance") / PRICE_FACTOR).alias("remaining_liquidatee_balance"),
                    (F.col("event.event.remaining_liquidator_balance") / PRICE_FACTOR).alias("remaining_liquidator_balance"),
                    (F.col("event.event.mark_price") / PRICE_FACTOR).alias("mark_price"),
@@ -365,10 +366,11 @@ def cleaned_ix_trade_geyser():
     return (dlt.read_stream("cleaned_transactions_geyser")
            .withWatermark("block_time", "1 hour")
            .select("*", F.posexplode("instructions").alias("instruction_index", "instruction"))
-           .filter("instruction.name == 'crank_event_queue'")
+           .filter((F.col("instruction.name") == 'crank_event_queue') | F.col("instruction.name").startswith('place_order'))
            .withColumn("event", F.explode("instruction.events"))
+           .filter("event.name == 'trade_event'")
            .join(markets_df, 
-                 (F.col("instruction.accounts.market") == markets_df.market_pub_key)
+                 (F.col("instruction.accounts.named.market") == markets_df.market_pub_key)
                   & F.col("block_time").between(markets_df.active_timestamp, markets_df.expiry_timestamp),
                  how="left"
                 )
@@ -384,9 +386,12 @@ def cleaned_ix_trade_geyser():
                    (F.col("event.event.size") / SIZE_FACTOR).alias("size"),
         #            (F.col("event.event.cost_of_trades") / PRICE_FACTOR).alias("cost_of_trades"),
                    F.when(F.col("event.event.is_bid").cast("boolean"), "bid").otherwise("ask").alias("side"),
+                   F.when(F.col("instruction.name") == 'crank_event_queue', "maker").otherwise("taker").alias("maker_taker"),
                    F.col("event.event.index").cast("smallint").alias("market_index"),
                    "event.event.client_order_id",
                    "event.event.order_id",
+                   (F.col("event.event.fee") / PRICE_FACTOR).alias("trading_fee"), # not instrumented for maker yet (but is 0 currently)
+                   (F.col("event.event.oracle_price") / PRICE_FACTOR).alias("oracle_price"), # not instrumented for maker yet
                    F.col("instruction.accounts.named").alias("accounts"),
                    "block_time",
                    "slot"
@@ -413,7 +418,7 @@ def cleaned_ix_position_movement_geyser():
            .filter("instruction.name == 'position_movement'")
            .withColumn("event", F.col("instruction.events")[0])
            .join(zetagroup_mapping_df, 
-             (F.col("instruction.accounts.zeta_group") == zetagroup_mapping_df.zetagroup_pub_key),
+             (F.col("instruction.accounts.named.zeta_group") == zetagroup_mapping_df.zetagroup_pub_key),
              how="left"
             )
            .select("signature",
@@ -452,7 +457,7 @@ def cleaned_ix_settle_positions_geyser():
            .filter("instruction.name == 'settle_positions'")
            .withColumn("event", F.explode("instruction.events"))
            .join(zetagroup_mapping_df, 
-             (F.col("instruction.accounts.zeta_group") == zetagroup_mapping_df.zetagroup_pub_key),
+             (F.col("instruction.accounts.named.zeta_group") == zetagroup_mapping_df.zetagroup_pub_key),
              how="left"
             )
            .select("signature",
@@ -512,7 +517,8 @@ def cleaned_ix_settle_positions_geyser():
 # place_order_df = (df.filter("is_successful")
 #         .withColumn("instruction", F.explode("instructions"))
 #         .filter(F.col("instruction.name").startswith("place_order"))
-#         .withColumn("event", F.col("instruction.events")[0])
+#         .withColumn("event", F.explode("instruction.events"))
+#         .filter("event.name == 'place_order_event'")
 #         .select(
 #             "signature",
 #             "instruction.name",
