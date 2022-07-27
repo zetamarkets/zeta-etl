@@ -45,37 +45,6 @@ BASE_PATH_TRANSFORMED = join("/mnt", S3_BUCKET_TRANSFORMED)
 
 # COMMAND ----------
 
-# transactions_schema = """
-# signature string,
-# instructions array<
-#     struct<
-#         name string,
-#         args map<string,string>,
-#         accounts struct<
-#             named map<string, string>,
-#             remaining array<string>
-#         >,
-#         events array<
-#             struct<
-#                 name string,
-#                 event map<string,string>
-#             >
-#         >
-#     >
-# >,
-# is_successful boolean,
-# slot bigint,
-# block_time timestamp,
-# year string,
-# month string,
-# day string,
-# hour string
-# """
-
-# df = spark.read.schema(transactions_schema).json("/mnt/zetadex-mainnet-landing/transactions-geyser/data")
-
-# COMMAND ----------
-
 # DBTITLE 1,Bronze
 transactions_schema = """
 signature string,
@@ -295,17 +264,17 @@ def cleaned_ix_cancel_order_geyser():
            .select("signature",
                    "instruction_index",
                    "underlying",
+#                    F.upper("event.event.asset").alias("underlying"),
                    F.col("expiry_timestamp").alias("expiry"),
                    "strike",
                    "kind",
                    "instruction.name",
-                   F.col("event.user").alias("user_pub_key"),
-                   F.upper("event.asset").alias("underlying"),
-                   "event.market_index",
-                   "event.side",
-                   "event.size",
-                   "event.order_id",
-                   "event.client_order_id",
+                   F.col("event.event.user").alias("user_pub_key"),
+                   "event.event.market_index",
+                   "event.event.side",
+                   "event.event.size",
+                   "event.event.order_id",
+                   "event.event.client_order_id",
                    F.col("instruction.accounts.named").alias("accounts"),
                    "block_time",
                    "slot"
