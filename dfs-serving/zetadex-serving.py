@@ -236,8 +236,14 @@ agg_prices_market_total_puts = \
 agg_prices_market_total_calls = \
 (spark.table("zetadex_mainnet.agg_prices_market_1h").filter(F.col("timestamp") == row1["max(timestamp)"]).filter(F.col("kind") == "call").groupBy().sum("open_interest", "open_interest_usd").drop("sum(strike)", "sum(theo)", "sum(delta)", "sum(vega)", "sum(sigma)", "sum(hour_)").withColumn("timestamp", F.lit(row1["max(timestamp)"])).withColumnRenamed("sum(open_interest)", "total_open_interest").withColumnRenamed("sum(open_interest_usd)", "total_open_interest_usd"))
 
-put_call_ratio = agg_prices_market_total_puts.collect()[0]['total_open_interest'] / agg_prices_market_total_calls.collect()[0]['total_open_interest']
+try:
+    put_call_ratio = agg_prices_market_total_puts.collect()[0]['total_open_interest'] / agg_prices_market_total_calls.collect()[0]['total_open_interest']
+except Exception:
+    put_call_ratio = 0
 print(put_call_ratio)
+
+# put_call_ratio = agg_prices_market_total_puts.collect()[0]['total_open_interest'] / agg_prices_market_total_calls.collect()[0]['total_open_interest']
+# print(put_call_ratio)
 # agg_prices_market_total_puts.show()
 # agg_prices_market_total_calls.show()
 
