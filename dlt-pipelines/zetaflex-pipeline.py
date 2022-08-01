@@ -14,6 +14,7 @@ import dlt
 # COMMAND ----------
 
 TVL_TABLE = "tvl"
+AUCTION_TABLE = "flex-snapshot-auctions"
 
 # COMMAND ----------
 
@@ -22,12 +23,8 @@ TVL_TABLE = "tvl"
 
 # COMMAND ----------
 
-S3_BUCKET = f"zetaflex-{NETWORK}"
-BASE_PATH = join("/mnt", S3_BUCKET)
-
-# COMMAND ----------
-
-# df = spark.read.json("/mnt/zetaflex-mainnet/tvl/raw/data/year=2022/month=05/day=19/hour=18/PUT-S3-zetaflex-mainnet-tvl-1-2022-05-19-18-05-13-63195153-aa4f-4c42-9b56-bf3c25f32357")
+S3_BUCKET_LANDED = f"zetaflex-{NETWORK}-landing"
+BASE_PATH_TRANSFORMED = join("/mnt", S3_BUCKET_LANDED)
 
 # COMMAND ----------
 
@@ -51,7 +48,7 @@ hour string
     table_properties={
         "quality":"bronze", 
     },
-    path=join(BASE_PATH,TVL_TABLE,"bronze/data"),
+    path=join(BASE_PATH,TVL_TABLE,"raw"),
     schema=tvl_schema
 )
 def raw_tvl():
@@ -64,7 +61,7 @@ def raw_tvl():
            .option("cloudFiles.useNotifications", True)
            .option("partitionColumns", "year,month,day,hour")
            .schema(tvl_schema)
-           .load(join(BASE_PATH,TVL_TABLE,"raw/data"))
+           .load(join(BASE_PATH_LANDED,TVL_TABLE,"data"))
           )
 
 # COMMAND ----------
@@ -76,7 +73,7 @@ def raw_tvl():
         "pipelines.autoOptimize.zOrderCols":"timestamp"
     },
     partition_cols=["date_", "hour_"],
-    path=join(BASE_PATH,TVL_TABLE,"silver/data")
+    path=join(BASE_PATH_TRANSFORMED,TVL_TABLE,"silver/data")
 )
 def cleaned_tvl():
     return (dlt.read_stream("raw_tvl")
@@ -84,4 +81,52 @@ def cleaned_tvl():
            .dropDuplicates()
            .withColumn("date_", F.to_date("timestamp"))
            .withColumn("hour_", F.date_format("timestamp", "HH"))
+          )
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Auctions
+
+# COMMAND ----------
+
+df = spark.read.json("/mnt/zetaflex-mainnet-landing/flex-snapshot-auctions/data/year=2022/month=6/day=28/hour=7/snapshot-combo-options-1658991621651.json")
+
+# COMMAND ----------
+
+display(df)
+
+# COMMAND ----------
+
+auction_schema = """
+  auctionTokenVault string,
+  auctionTokenMint string,
+  bidCurrencyMint string,
+  creator string,
+  auctionTokenAmount number,
+  bidEnd timestamp,
+  cooldownEnd timestamp,
+  winningBidder string,
+  exchangeAmount number,
+"""
+
+@dlt.table(
+    comment="Raw data for auctions",
+    table_properties={
+        "quality":"bronze", 
+    },
+    path=join(BASE_PATH,AUCTION_TABLE,"raw"),
+    schema=tvl_schema
+)
+def raw_tvl():
+    return (spark
+           .readStream
+           .format("cloudFiles")
+           .option("cloudFiles.format", "json")
+           .option("cloudFiles.region", "ap-southeast-1")
+           .option("cloudFiles.includeExistingFiles", True)
+           .option("cloudFiles.useNotifications", True)
+           .option("partitionColumns", "year,month,day,hour")
+           .schema(auction_schema)
+           .load(join(BASE_PATH_LANDED,AUCTION_TABLE,"data"))
           )
