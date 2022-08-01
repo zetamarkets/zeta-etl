@@ -240,22 +240,25 @@ def cleaned_ix_place_order_geyser():
     
 # Cancel order
 @dlt.table(
-    comment="Cleaned data for cancelOrder type instructions",
+    comment="Cleaned data for order completion, this includes CancelOrder variants as well as trade fill events",
     table_properties={
         "quality":"silver", 
         "pipelines.autoOptimize.zOrderCols":"timestamp"
     },
     partition_cols=["date_", "underlying"],
-    path=join(BASE_PATH_TRANSFORMED,TRANSACTIONS_TABLE,"cleaned-ix-cancel-order")
+    path=join(BASE_PATH_TRANSFORMED,TRANSACTIONS_TABLE,"cleaned-ix-order-complete")
 )
-def cleaned_ix_cancel_order_geyser():
+def cleaned_ix_order_complete_geyser():
     markets_df = dlt.read("cleaned_markets")
     return (dlt.read_stream("cleaned_transactions_geyser")
            .withWatermark("block_time", "1 hour")
            .select("*", F.posexplode("instructions").alias("instruction_index", "instruction"))
-           .filter(F.col("instruction.name").contains("cancel_order"))
+           .filter((F.col("instruction.name") == 'crank_event_queue') # maker fill
+                   | F.col("instruction.name").startswith('place_order') # taker fill
+                   | F.col("instruction.name").startswith('cancel_order') # cancel
+                  )
            .withColumn("event", F.explode("instruction.events"))
-           .filter("event.name == 'cancel_event'")
+           .filter("event.name == 'order_complete_event'")
            .join(markets_df, 
                  (F.col("instruction.accounts.named.market") == markets_df.market_pub_key)
                   & F.col("block_time").between(markets_df.active_timestamp, markets_df.expiry_timestamp),
@@ -269,10 +272,11 @@ def cleaned_ix_cancel_order_geyser():
                    "strike",
                    "kind",
                    "instruction.name",
+                   "event.event.order_complete_type",
                    F.col("event.event.user").alias("user_pub_key"),
                    "event.event.market_index",
                    "event.event.side",
-                   "event.event.size",
+                   "event.event.unfilled_size",
                    "event.event.order_id",
                    "event.event.client_order_id",
                    F.col("instruction.accounts.named").alias("accounts"),
