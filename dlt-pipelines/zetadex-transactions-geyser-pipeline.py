@@ -276,7 +276,7 @@ def cleaned_ix_order_complete_geyser():
                    F.col("event.event.user").alias("user_pub_key"),
                    "event.event.market_index",
                    "event.event.side",
-                   "event.event.unfilled_size",
+                   (F.col("event.event.unfilled_size") / SIZE_FACTOR).alias("unfilled_size"),
                    "event.event.order_id",
                    "event.event.client_order_id",
                    F.col("instruction.accounts.named").alias("accounts"),
