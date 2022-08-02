@@ -255,7 +255,7 @@ def cleaned_ix_order_complete_geyser():
            .select("*", F.posexplode("instructions").alias("instruction_index", "instruction"))
            .filter((F.col("instruction.name") == 'crank_event_queue') # maker fill
                    | F.col("instruction.name").startswith('place_order') # taker fill
-                   | F.col("instruction.name").startswith('cancel_order') # cancel
+                   | F.col("instruction.name").contains('cancel') # cancel
                   )
            .withColumn("event", F.explode("instruction.events"))
            .filter("event.name == 'order_complete_event'")
