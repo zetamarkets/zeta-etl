@@ -90,7 +90,9 @@ def cleaned_tvl():
 
 # COMMAND ----------
 
-df = spark.read.json("/mnt/zetaflex-mainnet-landing/flex-snapshot-auctions/data/year=2022/month=6/day=28/hour=7/snapshot-combo-options-1658991621651.json")
+a = "s3://zetaflex-mainnet-landing/flex-snapshot-combo-options/data/year=2022/month=8/day=1/snapshot-combo-options-1659351114113.json"
+df = spark.read.json("/mnt/zetaflex-mainnet-landing/flex-snapshot-combo-options/data/year=2022/month=8/day=1/snapshot-combo-options-1659351114113.json")
+
 
 # COMMAND ----------
 

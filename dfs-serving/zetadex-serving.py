@@ -1,5 +1,4 @@
 # Databricks notebook source
-# Databricks notebook source
 dbutils.widgets.dropdown("network", "devnet", ["devnet", "mainnet"], "Network")
 # NETWORK = dbutils.widgets.get("network")
 NETWORK = dbutils.widgets.get("pipeline.network")
@@ -39,7 +38,7 @@ online_store = AmazonDynamoDBSpec(
   region='ap-southeast-1',
 )
 
-underlyings = ['SOL', 'BTC']
+underlyings = ['SOL', 'BTC', 'ETH']
 
 # COMMAND ----------
 
