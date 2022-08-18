@@ -292,10 +292,10 @@ for underlying in underlyings:
     try:
         put_call_ratio_underlying = agg_prices_market_total_puts_underlying.collect()[0]['total_open_interest'] / agg_prices_market_total_calls_underlying.collect()[0]['total_open_interest']
     except Exception:
-        put_call_ratio_underlying = 0
+        put_call_ratio_underlying = 0.0
     print(put_call_ratio_underlying)
 
-    agg_prices_market_total_df_underlying = agg_prices_market_total_df_underlying.withColumn("put_call_ratio", F.lit(put_call_ratio_underlying))
+    agg_prices_market_total_df_underlying = agg_prices_market_total_df_underlying.withColumn("put_call_ratio", F.lit(put_call_ratio_underlying).cast("double"))
     agg_prices_market_total_df_underlying.show()
 
     try:
