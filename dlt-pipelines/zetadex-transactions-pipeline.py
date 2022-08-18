@@ -548,19 +548,21 @@ def cleaned_pnl():
               F.expr("""
                raw_pnl.underlying = d.underlying AND
                raw_pnl.owner_pub_key = d.owner_pub_key AND
-               raw_pnl.timestamp >= d.timestamp_window.start AND raw_pnl.timestamp < d.timestamp_window.end
+               raw_pnl.timestamp >= d.timestamp_window.start + interval '1' hour AND raw_pnl.timestamp < d.timestamp_window.end + interval '1' hour
                """), 
               how="left")
            .join(withdrawals_df.alias("w"),
               F.expr("""
                raw_pnl.underlying = w.underlying AND
                raw_pnl.owner_pub_key = w.owner_pub_key AND
-               raw_pnl.timestamp >= w.timestamp_window.start AND raw_pnl.timestamp < w.timestamp_window.end
+               raw_pnl.timestamp >= w.timestamp_window.start + interval '1' hour AND raw_pnl.timestamp < w.timestamp_window.end + interval '1' hour
                """), 
               how="left")
            .withColumn("deposit_amount", F.coalesce("deposit_amount",F.lit(0)))
            .withColumn("withdraw_amount", F.coalesce("withdraw_amount",F.lit(0)))
-           .withColumn("pnl", F.col("balance") + F.col("unrealized_pnl"))
+           .withColumn("deposit_amount_cumsum", F.sum("deposit_amount").over(Window.partitionBy("raw_pnl.underlying","raw_pnl.owner_pub_key").orderBy("raw_pnl.timestamp").rowsBetween(Window.unboundedPreceding, Window.currentRow)))
+           .withColumn("withdraw_amount_cumsum", F.sum("withdraw_amount").over(Window.partitionBy("raw_pnl.underlying","raw_pnl.owner_pub_key").orderBy("raw_pnl.timestamp").rowsBetween(Window.unboundedPreceding, Window.currentRow)))
+           .withColumn("pnl", F.col("balance") + F.col("unrealized_pnl") - (F.col("deposit_amount_cumsum") - F.col("withdraw_amount_cumsum")))
            .withColumn("date_", F.to_date("timestamp"))
            .withColumn("hour_", F.date_format("timestamp", "HH").cast("int"))
            .select(
@@ -572,6 +574,8 @@ def cleaned_pnl():
                "pnl",
                "deposit_amount",
                "withdraw_amount",
+               "deposit_amount_cumsum",
+               "withdraw_amount_cumsum",
                "date_",
                "hour_"
            )
