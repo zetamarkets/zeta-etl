@@ -541,7 +541,7 @@ def cleaned_pnl():
 #                  .withWatermark("date_hour", "1 hour")
                  .drop("date_","hour_")
                 )
-    return (dlt.read_stream("raw_pnl")
+    return (dlt.read("raw_pnl") # ideally would be read_stream
            .withWatermark("timestamp", "1 hour")
            .dropDuplicates(["owner_pub_key","underlying","year","month","day","hour"])
            .join(deposits_df.alias("d"),
@@ -549,14 +549,14 @@ def cleaned_pnl():
                raw_pnl.underlying = d.underlying AND
                raw_pnl.owner_pub_key = d.owner_pub_key AND
                raw_pnl.timestamp >= d.timestamp_window.start + interval '1' hour AND raw_pnl.timestamp < d.timestamp_window.end + interval '1' hour
-               """), 
+               """),
               how="left")
            .join(withdrawals_df.alias("w"),
               F.expr("""
                raw_pnl.underlying = w.underlying AND
                raw_pnl.owner_pub_key = w.owner_pub_key AND
                raw_pnl.timestamp >= w.timestamp_window.start + interval '1' hour AND raw_pnl.timestamp < w.timestamp_window.end + interval '1' hour
-               """), 
+               """),
               how="left")
            .withColumn("deposit_amount", F.coalesce("deposit_amount",F.lit(0)))
            .withColumn("withdraw_amount", F.coalesce("withdraw_amount",F.lit(0)))
@@ -669,16 +669,20 @@ def agg_pnl():
                 F.sum("pnl").alias("pnl"),
                 F.sum("deposit_amount").alias("deposit_amount"),
                 F.sum("withdraw_amount").alias("withdraw_amount"),
+                F.sum("balance").alias("balance"),
                 )
             .withColumn("pnl_lag_24h",F.lag("pnl",24).over(windowSpec))
             .withColumn("pnl_lag_7d",F.lag("pnl",24*7).over(windowSpec))
             .withColumn("pnl_lag_30d",F.lag("pnl",24*7*30).over(windowSpec))
+            .withColumn("balance_lag_24h",F.lag("balance",24).over(windowSpec))
+            .withColumn("balance_lag_7d",F.lag("balance",24*7).over(windowSpec))
+            .withColumn("balance_lag_30d",F.lag("balance",24*7*30).over(windowSpec))
             .withColumn("pnl_diff_24h",F.col("pnl")-F.col("pnl_lag_24h")-(F.sum("deposit_amount").over(windowSpec24h)-F.sum("withdraw_amount").over(windowSpec24h)))
             .withColumn("pnl_diff_7d",F.col("pnl")-F.col("pnl_lag_7d")-(F.sum("deposit_amount").over(windowSpec7d)-F.sum("withdraw_amount").over(windowSpec7d)))
             .withColumn("pnl_diff_30d",F.col("pnl")-F.col("pnl_lag_30d")-(F.sum("deposit_amount").over(windowSpec30d)-F.sum("withdraw_amount").over(windowSpec30d)))
-            .withColumn("pnl_ratio_24h",F.col("pnl_diff_24h")/F.col("pnl_lag_24h"))
-            .withColumn("pnl_ratio_7d",F.col("pnl_diff_7d")/F.col("pnl_lag_7d"))
-            .withColumn("pnl_ratio_30d",F.col("pnl_diff_30d")/F.col("pnl_lag_30d"))
+            .withColumn("pnl_ratio_24h",F.col("pnl_diff_24h")/F.col("balance_lag_24h"))
+            .withColumn("pnl_ratio_7d",F.col("pnl_diff_7d")/F.col("balance_lag_7d"))
+            .withColumn("pnl_ratio_30d",F.col("pnl_diff_30d")/F.col("balance_lag_30d"))
             .withColumn("pnl_ratio_24h_rank", F.rank().over(Window.partitionBy("date_","hour_").orderBy(F.desc("pnl_ratio_24h"),F.desc("pnl_diff_24h"), "owner_pub_key")))
             .withColumn("pnl_ratio_7d_rank", F.rank().over(Window.partitionBy("date_","hour_").orderBy(F.desc("pnl_ratio_7d"),F.desc("pnl_diff_7d"), "owner_pub_key")))
             .withColumn("pnl_ratio_30d_rank", F.rank().over(Window.partitionBy("date_","hour_").orderBy(F.desc("pnl_ratio_30d"),F.desc("pnl_diff_30d"), "owner_pub_key")))
