@@ -167,7 +167,7 @@ combo_option_schema = """
   underlying_count int,
   option_params array<
                   struct<
-                      strike int,
+                      strike bigint,
                       kind string,
                       size int
                       >
