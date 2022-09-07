@@ -11,6 +11,7 @@ import pyspark.sql.functions as F
 import pyspark.sql.types as T
 from pyspark.sql.window import Window
 from os.path import join
+from itertools import chain
 import dlt
 
 # COMMAND ----------
@@ -330,6 +331,15 @@ def cleaned_ix_liquidate_geyser():
            .withColumn("hour_", F.date_format("block_time", "HH").cast("int"))
            )
 
+# MAKER
+# ix.name == 'crank_event_queue'
+# ix.events == 'trade_event'
+
+# TAKER
+# ix.name == 'place_order*'
+# ix.events == 'place_order_event' | 'trade_event'
+# [0] place_order_event, [1] trade_event
+    
 # Trades
 @dlt.table(
     comment="Cleaned data for trades",
@@ -342,18 +352,68 @@ def cleaned_ix_liquidate_geyser():
 )
 def cleaned_ix_trade_geyser():
     markets_df = dlt.read("cleaned_markets")
-    return (dlt.read_stream("cleaned_transactions_geyser")
+    df = (dlt.read_stream("cleaned_transactions_geyser")
            .withWatermark("block_time", "1 hour")
            .select("*", F.posexplode("instructions").alias("instruction_index", "instruction"))
-           .filter((F.col("instruction.name") == 'crank_event_queue') | F.col("instruction.name").startswith('place_order'))
-           .withColumn("event", F.explode("instruction.events"))
-           .filter("event.name == 'trade_event'")
-           .join(markets_df, 
+         )
+    maker_df = (df
+        .filter("instruction.name == 'crank_event_queue'")
+        .withColumn("event", F.explode("instruction.events"))
+        .filter("event.name == 'trade_event'")
+        .withColumn("maker_taker", F.lit("maker"))
+              )
+    # Join place_order_event on optional trade_event
+    taker_df = (df
+        .filter(F.col("instruction.name").startswith('place_order'))
+        .withColumn("event", F.explode("instruction.events"))
+        .withColumn("order_id", F.col("event.event.order_id"))
+               )
+    taker_df = (taker_df
+            .filter("event.name == 'place_order_event'")
+            .alias("a")
+            .join(taker_df.filter("event.name == 'trade_event'").alias("b"),
+              on="order_id",
+              how="left"
+            )
+            .select(
+                "a.signature",
+                "a.instructions",
+                "a.is_successful",
+                "a.slot",
+                "a.block_time",
+                "a.date_",
+                "a.hour_",
+                "a.instruction_index",
+                "a.instruction",
+                F.when(F.col("b.signature").isNull(), F.col("a.event"))
+                 .otherwise(
+                     F.struct(F.lit("place_order_trade_event").alias("name"), F.create_map(list(chain(*(
+                         (F.lit(name.split(".")[-1]), name) for name in [
+                            "b.event.event.margin_account", 
+                            "b.event.event.cost_of_trades", 
+                            "b.event.event.size", 
+                            "b.event.event.is_bid", 
+                            "b.event.event.index", 
+                            "b.event.event.client_order_id", 
+                            "a.event.event.order_id", 
+                            "a.event.event.fee", 
+                            "a.event.event.oracle_price"
+                        ]
+                        )))).alias("event")
+                    )
+                 ).alias("event")
+            )
+            .withColumn("maker_taker", F.lit("taker"))
+          )
+    # Union all maker and taker
+    return (maker_df
+            .union(taker_df)
+            .join(markets_df, 
                  (F.col("instruction.accounts.named.market") == markets_df.market_pub_key)
                   & F.col("block_time").between(markets_df.active_timestamp, markets_df.expiry_timestamp),
                  how="left"
                 )
-           .select("signature",
+            .select("signature",
                    "instruction_index",
                    "underlying",
                    F.col("expiry_timestamp").alias("expiry"),
@@ -363,7 +423,7 @@ def cleaned_ix_trade_geyser():
                    "event.event.margin_account",
                    ((F.col("event.event.cost_of_trades") / F.col("event.event.size")) / (PRICE_FACTOR/SIZE_FACTOR)).alias("price"),
                    (F.col("event.event.size") / SIZE_FACTOR).alias("size"),
-        #            (F.col("event.event.cost_of_trades") / PRICE_FACTOR).alias("cost_of_trades"),
+            #            (F.col("event.event.cost_of_trades") / PRICE_FACTOR).alias("cost_of_trades"),
                    F.when(F.col("event.event.is_bid").cast("boolean"), "bid").otherwise("ask").alias("side"),
                    F.when(F.col("instruction.name") == 'crank_event_queue', "maker").otherwise("taker").alias("maker_taker"),
                    F.col("event.event.index").cast("smallint").alias("market_index"),
@@ -375,9 +435,9 @@ def cleaned_ix_trade_geyser():
                    "block_time",
                    "slot"
                   )
-           .withColumn("date_", F.to_date("block_time"))
-           .withColumn("hour_", F.date_format("block_time", "HH").cast("int"))
-            )
+            .withColumn("date_", F.to_date("block_time"))
+            .withColumn("hour_", F.date_format("block_time", "HH").cast("int"))
+    )
 
 # Position Movement
 @dlt.table(
@@ -449,3 +509,7 @@ def cleaned_ix_settle_positions_geyser():
            .withColumn("date_", F.to_date("block_time"))
            .withColumn("hour_", F.date_format("block_time", "HH").cast("int"))
             )
+
+# COMMAND ----------
+
+
