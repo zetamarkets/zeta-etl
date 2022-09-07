@@ -98,7 +98,7 @@ def raw_transactions_geyser():
 # COMMAND ----------
 
 # DBTITLE 1,Silver
-@udf(returnType=
+@F.udf(returnType=
      T.StructType([
           T.StructField("name", T.StringType(), False), 
           T.StructField("event", T.MapType(T.StringType(), T.StringType()), False)
