@@ -98,6 +98,25 @@ def raw_transactions_geyser():
 # COMMAND ----------
 
 # DBTITLE 1,Silver
+@udf(returnType=
+     T.StructType([
+          T.StructField("name", T.StringType(), False), 
+          T.StructField("event", T.MapType(T.StringType(), T.StringType()), False)
+         ])
+    )
+def place_trade_event_merge(arr):
+    p = None
+    t = None
+    for x in arr:
+        if x.name == "place_order_event":
+            p = x
+        elif x.name == "trade_event":
+            t = x
+    if t is not None:
+        return ('place_order_trade_event', {**p.event, **t.event})
+    else:
+        return p
+
 @dlt.view
 def zetagroup_mapping():
     return spark.table(f"zetadex_{NETWORK}.zetagroup_mapping")
@@ -362,49 +381,12 @@ def cleaned_ix_trade_geyser():
         .filter("event.name == 'trade_event'")
         .withColumn("maker_taker", F.lit("maker"))
               )
-    # Join place_order_event on optional trade_event
     taker_df = (df
-        .filter(F.col("instruction.name").startswith('place_order'))
-        .withColumn("event", F.explode("instruction.events"))
-        .withColumn("order_id", F.col("event.event.order_id"))
-               )
-    taker_df = (taker_df
-            .filter("event.name == 'place_order_event'")
-            .alias("a")
-            .join(taker_df.filter("event.name == 'trade_event'").alias("b"),
-              on="order_id",
-              how="left"
-            )
-            .select(
-                "a.signature",
-                "a.instructions",
-                "a.is_successful",
-                "a.slot",
-                "a.block_time",
-                "a.date_",
-                "a.hour_",
-                "a.instruction_index",
-                "a.instruction",
-                F.when(F.col("b.signature").isNull(), F.col("a.event"))
-                 .otherwise(
-                     F.struct(F.lit("place_order_trade_event").alias("name"), F.create_map(list(chain(*(
-                         (F.lit(name.split(".")[-1]), name) for name in [
-                            "b.event.event.margin_account", 
-                            "b.event.event.cost_of_trades", 
-                            "b.event.event.size", 
-                            "b.event.event.is_bid", 
-                            "b.event.event.index", 
-                            "b.event.event.client_order_id", 
-                            "a.event.event.order_id", 
-                            "a.event.event.fee", 
-                            "a.event.event.oracle_price"
-                        ]
-                        )))).alias("event")
-                    )
-                 ).alias("event")
-            )
-            .withColumn("maker_taker", F.lit("taker"))
-          )
+    .filter(F.col("instruction.name").startswith('place_order'))
+    .filter(F.array_contains("instruction.events.name", F.lit('trade_event'))) # filter to only taker orders that trade
+    .withColumn("event", place_trade_event_merge("instruction.events"))
+    .withColumn("maker_taker", F.lit("taker"))
+           )
     # Union all maker and taker
     return (maker_df
             .union(taker_df)
@@ -423,7 +405,6 @@ def cleaned_ix_trade_geyser():
                    "event.event.margin_account",
                    ((F.col("event.event.cost_of_trades") / F.col("event.event.size")) / (PRICE_FACTOR/SIZE_FACTOR)).alias("price"),
                    (F.col("event.event.size") / SIZE_FACTOR).alias("size"),
-            #            (F.col("event.event.cost_of_trades") / PRICE_FACTOR).alias("cost_of_trades"),
                    F.when(F.col("event.event.is_bid").cast("boolean"), "bid").otherwise("ask").alias("side"),
                    F.when(F.col("instruction.name") == 'crank_event_queue', "maker").otherwise("taker").alias("maker_taker"),
                    F.col("event.event.index").cast("smallint").alias("market_index"),
