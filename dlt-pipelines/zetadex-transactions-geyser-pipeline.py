@@ -410,6 +410,8 @@ def cleaned_ix_trade_geyser():
                    F.col("event.event.index").cast("smallint").alias("market_index"),
                    "event.event.client_order_id",
                    "event.event.order_id",
+                   "instruction.args.order_type",
+                   "instruction.args.tag",
                    (F.col("event.event.fee") / PRICE_FACTOR).alias("trading_fee"), # not instrumented for maker yet (but is 0 currently)
                    (F.col("event.event.oracle_price") / PRICE_FACTOR).alias("oracle_price"), # not instrumented for maker yet
                    F.col("instruction.accounts.named").alias("accounts"),
@@ -490,7 +492,3 @@ def cleaned_ix_settle_positions_geyser():
            .withColumn("date_", F.to_date("block_time"))
            .withColumn("hour_", F.date_format("block_time", "HH").cast("int"))
             )
-
-# COMMAND ----------
-
-
