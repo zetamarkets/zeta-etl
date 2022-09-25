@@ -3,7 +3,6 @@
 dbutils.widgets.dropdown("network", "devnet", ["devnet", "mainnet"], "Network")
 # NETWORK = dbutils.widgets.get("network")
 NETWORK = spark.conf.get("pipeline.network")
-print(spark.conf)
 
 # COMMAND ----------
 
@@ -26,6 +25,7 @@ PRICE_FACTOR = 1e6
 SIZE_FACTOR = 1e3
 
 TRANSACTIONS_TABLE = "transactions-geyser"
+SLOTS_TABLE = "slots-geyser"
 
 # COMMAND ----------
 
@@ -38,6 +38,66 @@ S3_BUCKET_LANDED = f"zetadex-{NETWORK}-landing"
 BASE_PATH_LANDED = join("/mnt", S3_BUCKET_LANDED)
 S3_BUCKET_TRANSFORMED = f"zetadex-{NETWORK}"
 BASE_PATH_TRANSFORMED = join("/mnt", S3_BUCKET_TRANSFORMED)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Slots
+
+# COMMAND ----------
+
+slots_schema = """
+slot bigint,
+status string,
+type string,
+year string,
+month string,
+day string,
+hour string
+"""
+
+@dlt.table(
+    comment="Raw data for geyser slots",
+    table_properties={
+        "quality":"bronze", 
+    },
+    path=join(BASE_PATH_TRANSFORMED,SLOTS_TABLE,"raw"),
+    schema=slots_schema
+)
+def raw_slots_geyser():
+    return (spark
+           .readStream
+           .format("cloudFiles")
+           .option("cloudFiles.format", "json")
+           .option("cloudFiles.region", "ap-southeast-1")
+           .option("cloudFiles.includeExistingFiles", True)
+           .option("cloudFiles.useNotifications", True)
+           .option("partitionColumns", "year,month,day,hour")
+           .schema(slots_schema)
+           .load(join(BASE_PATH_LANDED,SLOTS_TABLE,"data"))
+          )
+
+# COMMAND ----------
+
+@dlt.table(
+    comment="Cleaned data for finalized geyser slots",
+    table_properties={
+        "quality":"silver", 
+        "pipelines.autoOptimize.zOrderCols":"slot"
+    },
+    partition_cols=["date_"],
+    path=join(BASE_PATH_TRANSFORMED,SLOTS_TABLE,"cleaned")
+)
+def cleaned_slots_geyser():
+    return (dlt.read_stream("raw_slots_geyser")
+           .withColumn("indexed_timestamp", F.to_timestamp(F.concat(F.col("year"), F.lit("-"), F.col("month"), F.lit("-"), F.col("day"), F.lit(" "), F.col("hour")), "yyyy-MM-dd HH"))
+           .withWatermark("indexed_timestamp", "1 hour")
+           .filter("status == 'finalized'")
+           .select("slot", "indexed_timestamp")
+           .dropDuplicates(["slot"])
+           .withColumn("date_", F.to_date("indexed_timestamp"))
+           .withColumn("hour_", F.date_format("indexed_timestamp", "HH").cast("int"))
+          )
 
 # COMMAND ----------
 
@@ -130,7 +190,7 @@ def cleaned_markets():
     comment="Cleaned data for platform transactions",
     table_properties={
         "quality":"silver", 
-        "pipelines.autoOptimize.zOrderCols":"timestamp"
+        "pipelines.autoOptimize.zOrderCols":"block_time"
     },
     partition_cols=["date_"],
     path=join(BASE_PATH_TRANSFORMED,TRANSACTIONS_TABLE,"cleaned-transactions")
@@ -150,7 +210,7 @@ def cleaned_transactions_geyser():
     comment="Cleaned data for deposit instructions",
     table_properties={
         "quality":"silver", 
-        "pipelines.autoOptimize.zOrderCols":"timestamp"
+        "pipelines.autoOptimize.zOrderCols":"block_time"
     },
     partition_cols=["date_", "underlying"],
     path=join(BASE_PATH_TRANSFORMED,TRANSACTIONS_TABLE,"cleaned-ix-deposit")
@@ -183,7 +243,7 @@ def cleaned_ix_deposit_geyser():
     comment="Cleaned data for withdraw instructions",
     table_properties={
         "quality":"silver", 
-        "pipelines.autoOptimize.zOrderCols":"timestamp"
+        "pipelines.autoOptimize.zOrderCols":"block_time"
     },
     partition_cols=["date_", "underlying"],
     path=join(BASE_PATH_TRANSFORMED,TRANSACTIONS_TABLE,"cleaned-ix-withdraw")
@@ -216,7 +276,7 @@ def cleaned_ix_withdraw_geyser():
     comment="Cleaned data for placeOrder type instructions",
     table_properties={
         "quality":"silver", 
-        "pipelines.autoOptimize.zOrderCols":"timestamp"
+        "pipelines.autoOptimize.zOrderCols":"block_time"
     },
     partition_cols=["date_", "underlying"],
     path=join(BASE_PATH_TRANSFORMED,TRANSACTIONS_TABLE,"cleaned-ix-place-order")
@@ -263,7 +323,7 @@ def cleaned_ix_place_order_geyser():
     comment="Cleaned data for order completion, this includes CancelOrder variants as well as trade fill events",
     table_properties={
         "quality":"silver", 
-        "pipelines.autoOptimize.zOrderCols":"timestamp"
+        "pipelines.autoOptimize.zOrderCols":"block_time"
     },
     partition_cols=["date_", "underlying"],
     path=join(BASE_PATH_TRANSFORMED,TRANSACTIONS_TABLE,"cleaned-ix-order-complete")
@@ -312,7 +372,7 @@ def cleaned_ix_order_complete_geyser():
     comment="Cleaned data for liquidate instructions",
     table_properties={
         "quality":"silver", 
-        "pipelines.autoOptimize.zOrderCols":"timestamp"
+        "pipelines.autoOptimize.zOrderCols":"block_time"
     },
     partition_cols=["date_", "underlying"],
     path=join(BASE_PATH_TRANSFORMED,TRANSACTIONS_TABLE,"cleaned-ix-liquidate")
@@ -364,7 +424,7 @@ def cleaned_ix_liquidate_geyser():
     comment="Cleaned data for trades",
     table_properties={
         "quality":"silver", 
-        "pipelines.autoOptimize.zOrderCols":"timestamp"
+        "pipelines.autoOptimize.zOrderCols":"block_time"
     },
     partition_cols=["date_", "underlying"],
     path=join(BASE_PATH_TRANSFORMED,TRANSACTIONS_TABLE,"cleaned-ix-trade")
@@ -427,7 +487,7 @@ def cleaned_ix_trade_geyser():
     comment="Cleaned data for position movement instructions (strategy accounts)",
     table_properties={
         "quality":"silver", 
-        "pipelines.autoOptimize.zOrderCols":"timestamp"
+        "pipelines.autoOptimize.zOrderCols":"block_time"
     },
     partition_cols=["date_", "underlying"],
     path=join(BASE_PATH_TRANSFORMED,TRANSACTIONS_TABLE,"cleaned-ix-position-movement")
@@ -466,7 +526,7 @@ def cleaned_ix_position_movement_geyser():
     comment="Cleaned data for position settlement",
     table_properties={
         "quality":"silver", 
-        "pipelines.autoOptimize.zOrderCols":"timestamp"
+        "pipelines.autoOptimize.zOrderCols":"block_time"
     },
     partition_cols=["date_", "underlying"],
     path=join(BASE_PATH_TRANSFORMED,TRANSACTIONS_TABLE,"cleaned-ix-settle-positions")

@@ -179,11 +179,65 @@ for underlying in underlyings:
 
 # COMMAND ----------
 
+# DBTITLE 1,zetadex_feature_store.agg_surfaces_expiry_1h
+table_name = "zetadex_feature_store.agg_surfaces_expiry_1h_v2"
+
+row1 = (spark.table("zetadex_mainnet.agg_surfaces_expiry_1h").agg({"timestamp": "max"}).collect())[0]
+print(row1["max(timestamp)"])
+
+agg_surfaces_expiry_1h_df = \
+    (spark.table("zetadex_mainnet.agg_surfaces_expiry_1h")
+     .filter(F.col("timestamp") == row1["max(timestamp)"])
+     .withColumn("ddb_key", F.concat(F.col("underlying"), F.lit("#"), F.unix_timestamp(F.col("expiry_timestamp"))))
+     )
+agg_surfaces_expiry_1h_df = agg_surfaces_expiry_1h_df.drop("timestamp_window", "underlying", "date_", "hour_")
+agg_surfaces_expiry_1h_df.show()
+
+try:
+    result = fs.get_table(table_name)
+    print(result)
+    print('Table Already Exists...')
+except ValueError:
+    print('Creating New Table...')
+    fs.create_table(
+        name=table_name,
+        primary_keys="ddb_key",
+        df=agg_surfaces_expiry_1h_df,
+        description="Aggregated surfaces expiry 1h",
+    )
+except Exception:
+    print('Table Already Exists...')
+
+# Write new results to table
+fs.write_table(
+  name=table_name,
+  df=agg_surfaces_expiry_1h_df,
+  mode="merge",
+)
+
+fs.publish_table(
+  name=table_name,
+  online_store=online_store,
+#   filter_condition=f"date_ = '{current_date}' and hour_ = '{current_hour}'",
+  features=[
+      'ddb_key',
+      'interest_rate',
+      'vol_surface',
+      'timestamp',
+      'expiry_timestamp'
+  ],
+  mode='merge'
+)
+
+# COMMAND ----------
+
 # DBTITLE 1,zetadex_feature_store.agg_prices_market_1h
-# On the fly transformation forming unique primary key for ddb using a concatenation of market values
+row1 = (spark.table("zetadex_mainnet.agg_prices_market_1h").agg({"timestamp": "max"}).collect())[0]
+print(row1["max(timestamp)"])
+
 agg_prices_market_1h_df = \
     (spark.table("zetadex_mainnet.agg_prices_market_1h")
-     .filter(F.col("timestamp") >= (F.date_trunc("hour", F.current_timestamp()) - F.expr('INTERVAL 1 HOUR')))
+     .filter(F.col("timestamp") == row1["max(timestamp)"])
      .withColumn("ddb_key", F.concat(F.col("underlying"), F.lit("#"), F.unix_timestamp(F.col("expiry_timestamp")), F.lit("#"), F.col("kind"), F.lit("#"), F.col("strike")))
      )
 agg_prices_market_1h_df = agg_prices_market_1h_df.drop("timestamp_window", "underlying", "strike", "kind", "date_", "hour_")

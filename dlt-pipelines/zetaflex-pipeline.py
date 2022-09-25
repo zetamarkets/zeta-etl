@@ -135,7 +135,7 @@ def raw_auction():
 
 # COMMAND ----------
 
-dlt.create_target_table(
+dlt.create_streaming_live_table(
     name="cleaned_auction",
     comment="Cleaned and deduped auctions",
     table_properties={
@@ -209,7 +209,7 @@ def raw_combo_option():
 
 # COMMAND ----------
 
-dlt.create_target_table(
+dlt.create_streaming_live_table(
     name="cleaned_combo_option",
     comment="Cleaned and deduped combo options",
     table_properties={
@@ -279,7 +279,7 @@ def raw_option():
 
 # COMMAND ----------
 
-dlt.create_target_table(
+dlt.create_streaming_live_table(
     name="cleaned_option",
     comment="Cleaned and deduped options",
     table_properties={
@@ -336,7 +336,7 @@ def raw_settlement_account():
 
 # COMMAND ----------
 
-dlt.create_target_table(
+dlt.create_streaming_live_table(
     name="cleaned_settlement_account",
     comment="Cleaned and deduped settlement accounts",
     table_properties={
@@ -393,7 +393,7 @@ def raw_underlying():
 
 # COMMAND ----------
 
-dlt.create_target_table(
+dlt.create_streaming_live_table(
     name="cleaned_underlying",
     comment="Cleaned and deduped underlyings",
     table_properties={
