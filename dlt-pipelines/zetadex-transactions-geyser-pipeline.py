@@ -3,7 +3,6 @@
 dbutils.widgets.dropdown("network", "devnet", ["devnet", "mainnet"], "Network")
 # NETWORK = dbutils.widgets.get("network")
 NETWORK = spark.conf.get("pipeline.network")
-print(spark.conf)
 
 # COMMAND ----------
 
@@ -11,6 +10,7 @@ import pyspark.sql.functions as F
 import pyspark.sql.types as T
 from pyspark.sql.window import Window
 from os.path import join
+from itertools import chain
 import dlt
 
 # COMMAND ----------
@@ -25,6 +25,7 @@ PRICE_FACTOR = 1e6
 SIZE_FACTOR = 1e3
 
 TRANSACTIONS_TABLE = "transactions-geyser"
+SLOTS_TABLE = "slots-geyser"
 
 # COMMAND ----------
 
@@ -37,6 +38,66 @@ S3_BUCKET_LANDED = f"zetadex-{NETWORK}-landing"
 BASE_PATH_LANDED = join("/mnt", S3_BUCKET_LANDED)
 S3_BUCKET_TRANSFORMED = f"zetadex-{NETWORK}"
 BASE_PATH_TRANSFORMED = join("/mnt", S3_BUCKET_TRANSFORMED)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Slots
+
+# COMMAND ----------
+
+slots_schema = """
+slot bigint,
+status string,
+type string,
+year string,
+month string,
+day string,
+hour string
+"""
+
+@dlt.table(
+    comment="Raw data for geyser slots",
+    table_properties={
+        "quality":"bronze", 
+    },
+    path=join(BASE_PATH_TRANSFORMED,SLOTS_TABLE,"raw"),
+    schema=slots_schema
+)
+def raw_slots_geyser():
+    return (spark
+           .readStream
+           .format("cloudFiles")
+           .option("cloudFiles.format", "json")
+           .option("cloudFiles.region", "ap-southeast-1")
+           .option("cloudFiles.includeExistingFiles", True)
+           .option("cloudFiles.useNotifications", True)
+           .option("partitionColumns", "year,month,day,hour")
+           .schema(slots_schema)
+           .load(join(BASE_PATH_LANDED,SLOTS_TABLE,"data"))
+          )
+
+# COMMAND ----------
+
+@dlt.table(
+    comment="Cleaned data for finalized geyser slots",
+    table_properties={
+        "quality":"silver", 
+        "pipelines.autoOptimize.zOrderCols":"slot"
+    },
+    partition_cols=["date_"],
+    path=join(BASE_PATH_TRANSFORMED,SLOTS_TABLE,"cleaned")
+)
+def cleaned_slots_geyser():
+    return (dlt.read_stream("raw_slots_geyser")
+           .withColumn("indexed_timestamp", F.to_timestamp(F.concat(F.col("year"), F.lit("-"), F.col("month"), F.lit("-"), F.col("day"), F.lit(" "), F.col("hour")), "yyyy-MM-dd HH"))
+           .withWatermark("indexed_timestamp", "1 hour")
+           .filter("status == 'finalized'")
+           .select("slot", "indexed_timestamp")
+           .dropDuplicates(["slot"])
+           .withColumn("date_", F.to_date("indexed_timestamp"))
+           .withColumn("hour_", F.date_format("indexed_timestamp", "HH").cast("int"))
+          )
 
 # COMMAND ----------
 
@@ -97,6 +158,25 @@ def raw_transactions_geyser():
 # COMMAND ----------
 
 # DBTITLE 1,Silver
+@F.udf(returnType=
+     T.StructType([
+          T.StructField("name", T.StringType(), False), 
+          T.StructField("event", T.MapType(T.StringType(), T.StringType()), False)
+         ])
+    )
+def place_trade_event_merge(arr):
+    p = None
+    t = None
+    for x in arr:
+        if x.name == "place_order_event":
+            p = x
+        elif x.name == "trade_event":
+            t = x
+    if t is not None:
+        return ('place_order_trade_event', {**p.event, **t.event})
+    else:
+        return p
+
 @dlt.view
 def zetagroup_mapping():
     return spark.table(f"zetadex_{NETWORK}.zetagroup_mapping")
@@ -110,7 +190,7 @@ def cleaned_markets():
     comment="Cleaned data for platform transactions",
     table_properties={
         "quality":"silver", 
-        "pipelines.autoOptimize.zOrderCols":"timestamp"
+        "pipelines.autoOptimize.zOrderCols":"block_time"
     },
     partition_cols=["date_"],
     path=join(BASE_PATH_TRANSFORMED,TRANSACTIONS_TABLE,"cleaned-transactions")
@@ -130,7 +210,7 @@ def cleaned_transactions_geyser():
     comment="Cleaned data for deposit instructions",
     table_properties={
         "quality":"silver", 
-        "pipelines.autoOptimize.zOrderCols":"timestamp"
+        "pipelines.autoOptimize.zOrderCols":"block_time"
     },
     partition_cols=["date_", "underlying"],
     path=join(BASE_PATH_TRANSFORMED,TRANSACTIONS_TABLE,"cleaned-ix-deposit")
@@ -163,7 +243,7 @@ def cleaned_ix_deposit_geyser():
     comment="Cleaned data for withdraw instructions",
     table_properties={
         "quality":"silver", 
-        "pipelines.autoOptimize.zOrderCols":"timestamp"
+        "pipelines.autoOptimize.zOrderCols":"block_time"
     },
     partition_cols=["date_", "underlying"],
     path=join(BASE_PATH_TRANSFORMED,TRANSACTIONS_TABLE,"cleaned-ix-withdraw")
@@ -196,7 +276,7 @@ def cleaned_ix_withdraw_geyser():
     comment="Cleaned data for placeOrder type instructions",
     table_properties={
         "quality":"silver", 
-        "pipelines.autoOptimize.zOrderCols":"timestamp"
+        "pipelines.autoOptimize.zOrderCols":"block_time"
     },
     partition_cols=["date_", "underlying"],
     path=join(BASE_PATH_TRANSFORMED,TRANSACTIONS_TABLE,"cleaned-ix-place-order")
@@ -243,7 +323,7 @@ def cleaned_ix_place_order_geyser():
     comment="Cleaned data for order completion, this includes CancelOrder variants as well as trade fill events",
     table_properties={
         "quality":"silver", 
-        "pipelines.autoOptimize.zOrderCols":"timestamp"
+        "pipelines.autoOptimize.zOrderCols":"block_time"
     },
     partition_cols=["date_", "underlying"],
     path=join(BASE_PATH_TRANSFORMED,TRANSACTIONS_TABLE,"cleaned-ix-order-complete")
@@ -292,7 +372,7 @@ def cleaned_ix_order_complete_geyser():
     comment="Cleaned data for liquidate instructions",
     table_properties={
         "quality":"silver", 
-        "pipelines.autoOptimize.zOrderCols":"timestamp"
+        "pipelines.autoOptimize.zOrderCols":"block_time"
     },
     partition_cols=["date_", "underlying"],
     path=join(BASE_PATH_TRANSFORMED,TRANSACTIONS_TABLE,"cleaned-ix-liquidate")
@@ -330,30 +410,52 @@ def cleaned_ix_liquidate_geyser():
            .withColumn("hour_", F.date_format("block_time", "HH").cast("int"))
            )
 
+# MAKER
+# ix.name == 'crank_event_queue'
+# ix.events == 'trade_event'
+
+# TAKER
+# ix.name == 'place_order*'
+# ix.events == 'place_order_event' | 'trade_event'
+# [0] place_order_event, [1] trade_event
+    
 # Trades
 @dlt.table(
     comment="Cleaned data for trades",
     table_properties={
         "quality":"silver", 
-        "pipelines.autoOptimize.zOrderCols":"timestamp"
+        "pipelines.autoOptimize.zOrderCols":"block_time"
     },
     partition_cols=["date_", "underlying"],
     path=join(BASE_PATH_TRANSFORMED,TRANSACTIONS_TABLE,"cleaned-ix-trade")
 )
 def cleaned_ix_trade_geyser():
     markets_df = dlt.read("cleaned_markets")
-    return (dlt.read_stream("cleaned_transactions_geyser")
+    df = (dlt.read_stream("cleaned_transactions_geyser")
            .withWatermark("block_time", "1 hour")
            .select("*", F.posexplode("instructions").alias("instruction_index", "instruction"))
-           .filter((F.col("instruction.name") == 'crank_event_queue') | F.col("instruction.name").startswith('place_order'))
-           .withColumn("event", F.explode("instruction.events"))
-           .filter("event.name == 'trade_event'")
-           .join(markets_df, 
+         )
+    maker_df = (df
+        .filter("instruction.name == 'crank_event_queue'")
+        .withColumn("event", F.explode("instruction.events"))
+        .filter("event.name == 'trade_event'")
+        .withColumn("maker_taker", F.lit("maker"))
+              )
+    taker_df = (df
+    .filter(F.col("instruction.name").startswith('place_order'))
+    .filter(F.array_contains("instruction.events.name", F.lit('trade_event'))) # filter to only taker orders that trade
+    .withColumn("event", place_trade_event_merge("instruction.events"))
+    .withColumn("maker_taker", F.lit("taker"))
+           )
+    # Union all maker and taker
+    return (maker_df
+            .union(taker_df)
+            .join(markets_df, 
                  (F.col("instruction.accounts.named.market") == markets_df.market_pub_key)
                   & F.col("block_time").between(markets_df.active_timestamp, markets_df.expiry_timestamp),
                  how="left"
                 )
-           .select("signature",
+            .select("signature",
                    "instruction_index",
                    "underlying",
                    F.col("expiry_timestamp").alias("expiry"),
@@ -363,28 +465,29 @@ def cleaned_ix_trade_geyser():
                    "event.event.margin_account",
                    ((F.col("event.event.cost_of_trades") / F.col("event.event.size")) / (PRICE_FACTOR/SIZE_FACTOR)).alias("price"),
                    (F.col("event.event.size") / SIZE_FACTOR).alias("size"),
-        #            (F.col("event.event.cost_of_trades") / PRICE_FACTOR).alias("cost_of_trades"),
                    F.when(F.col("event.event.is_bid").cast("boolean"), "bid").otherwise("ask").alias("side"),
                    F.when(F.col("instruction.name") == 'crank_event_queue', "maker").otherwise("taker").alias("maker_taker"),
                    F.col("event.event.index").cast("smallint").alias("market_index"),
                    "event.event.client_order_id",
                    "event.event.order_id",
+                   "instruction.args.order_type",
+                   "instruction.args.tag",
                    (F.col("event.event.fee") / PRICE_FACTOR).alias("trading_fee"), # not instrumented for maker yet (but is 0 currently)
                    (F.col("event.event.oracle_price") / PRICE_FACTOR).alias("oracle_price"), # not instrumented for maker yet
                    F.col("instruction.accounts.named").alias("accounts"),
                    "block_time",
                    "slot"
                   )
-           .withColumn("date_", F.to_date("block_time"))
-           .withColumn("hour_", F.date_format("block_time", "HH").cast("int"))
-            )
+            .withColumn("date_", F.to_date("block_time"))
+            .withColumn("hour_", F.date_format("block_time", "HH").cast("int"))
+    )
 
 # Position Movement
 @dlt.table(
     comment="Cleaned data for position movement instructions (strategy accounts)",
     table_properties={
         "quality":"silver", 
-        "pipelines.autoOptimize.zOrderCols":"timestamp"
+        "pipelines.autoOptimize.zOrderCols":"block_time"
     },
     partition_cols=["date_", "underlying"],
     path=join(BASE_PATH_TRANSFORMED,TRANSACTIONS_TABLE,"cleaned-ix-position-movement")
@@ -423,7 +526,7 @@ def cleaned_ix_position_movement_geyser():
     comment="Cleaned data for position settlement",
     table_properties={
         "quality":"silver", 
-        "pipelines.autoOptimize.zOrderCols":"timestamp"
+        "pipelines.autoOptimize.zOrderCols":"block_time"
     },
     partition_cols=["date_", "underlying"],
     path=join(BASE_PATH_TRANSFORMED,TRANSACTIONS_TABLE,"cleaned-ix-settle-positions")

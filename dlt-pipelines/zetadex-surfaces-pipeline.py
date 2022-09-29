@@ -122,4 +122,5 @@ def agg_surfaces_expiry_1h():
             )
             .withColumn("date_", F.to_date(F.col("timestamp_window.end") - F.expr('INTERVAL 1 HOUR')))
             .withColumn("hour_", F.date_format(F.col("timestamp_window.end") - F.expr('INTERVAL 1 HOUR'), "HH").cast("int"))
+            .withColumn("timestamp", F.col("timestamp_window.end"))
             )
