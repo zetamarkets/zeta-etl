@@ -179,6 +179,12 @@ for underlying in underlyings:
 
 # COMMAND ----------
 
+# DBTITLE 1,zetadex_feature_store.agg_trades_24h_rolling_market
+
+# table_name = f"zetadex_feature_store.agg_trades_24h_rolling_{underlying.lower()}_market"
+
+# COMMAND ----------
+
 # DBTITLE 1,zetadex_feature_store.agg_surfaces_expiry_1h
 table_name = "zetadex_feature_store.agg_surfaces_expiry_1h_v2"
 
