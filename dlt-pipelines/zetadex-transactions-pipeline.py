@@ -1,5 +1,4 @@
 # Databricks notebook source
-# Databricks notebook source
 dbutils.widgets.dropdown("network", "devnet", ["devnet", "mainnet"], "Network")
 # NETWORK = dbutils.widgets.get("network")
 NETWORK = spark.conf.get("pipeline.network")
@@ -50,6 +49,8 @@ active_timestamp timestamp,
 expiry_timestamp timestamp, 
 strike double, 
 kind string, 
+perp_sync_queue_head int,
+perp_sync_queue_length int,
 market_pub_key string, 
 timestamp timestamp, 
 slot bigint

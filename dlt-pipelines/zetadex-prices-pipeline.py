@@ -1,5 +1,4 @@
 # Databricks notebook source
-# Databricks notebook source
 dbutils.widgets.dropdown("network", "devnet", ["devnet", "mainnet"], "Network")
 # NETWORK = dbutils.widgets.get("network")
 NETWORK = spark.conf.get("pipeline.network")
@@ -261,6 +260,9 @@ delta double,
 vega double,
 sigma double,
 open_interest double,
+perp_latest_midpoint double,
+perp_funding_delta double,
+perp_latest_funding_rate double,
 slot long,
 year string,
 month string,
@@ -330,6 +332,9 @@ def cleaned_prices():
              "open_interest_usd",
              "price_usd",
              "open_interest_notional",
+             "perp_latest_midpoint",
+             "perp_funding_delta",
+             "perp_latest_funding_rate",
              "slot",
             )
       .withColumn("date_", F.to_date("timestamp"))

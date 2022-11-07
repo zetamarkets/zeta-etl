@@ -156,10 +156,6 @@ def raw_transactions_geyser():
 
 # COMMAND ----------
 
-'s'.startswith('s')
-
-# COMMAND ----------
-
 # DBTITLE 1,Silver
 @F.udf(returnType=
      T.StructType([
@@ -289,7 +285,7 @@ def cleaned_ix_place_order_geyser():
     return (dlt.read_stream("cleaned_transactions_geyser")
            .withWatermark("block_time", "1 hour")
            .select("*", F.posexplode("instructions").alias("instruction_index", "instruction"))
-           .filter(F.col("instruction.name").startswith('place_order'))
+           .filter(F.col("instruction.name").rlike("^place_(perp_)?order(_v[0-9]+)?$")) # place_order and place_perp_order variants
            .withColumn("event", F.explode("instruction.events"))
            .filter("event.name == 'place_order_event'")
            .join(markets_df, 
