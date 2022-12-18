@@ -79,6 +79,39 @@ fs.publish_table(
 
 # COMMAND ----------
 
+# DBTITLE 1,zetadex_feature_store.agg_funding (ALL)
+# No transformations, just use the 'agg_funding_rate_1h' table
+agg_funding_df = \
+    (spark.table("zetadex_mainnet.agg_funding_rate_1h")
+     .agg(
+         F.sum("asset").alias("asset"),
+         F.sum("margin_account").alias("margin_account"),
+         F.sum("balance_change").alias("balance_change"),
+         F.sum("hour").alias("timestamp"),
+      )
+     )
+agg_funding_df.show()
+# Write new results to table
+fs.write_table(
+  name='zetadex_feature_store.agg_funding',
+  df=agg_funding_df,
+  mode="merge",
+)
+
+fs.publish_table(
+  name='zetadex_feature_store.agg_funding',
+  online_store=online_store,
+#   filter_condition=f"date_ = '{current_date}' and hour_ = '{current_hour}'",
+  features=[
+    'asset',
+    'margin_account',
+    'balance_change',
+    'timestamp'],
+  mode='merge'
+)
+
+# COMMAND ----------
+
 # DBTITLE 1,zetadex_feature_store.agg_trades_24h_rolling_df (ALL)
 # On the fly transformation to get the last 24hrs volume from our 1h agg'ed tables
 agg_trades_24h_rolling_df = \
