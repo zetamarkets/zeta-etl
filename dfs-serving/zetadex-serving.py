@@ -84,32 +84,46 @@ fs.publish_table(
 
 # DBTITLE 1,zetadex_feature_store.agg_funding (ALL)
 # No transformations, just use the 'agg_funding_rate_1h' table
-agg_funding_df = \
-    (spark.table("zetadex_mainnet.agg_funding_rate_1h")
-     .agg(
-         F.sum("asset").alias("asset"),
-         F.sum("margin_account").alias("margin_account"),
-         F.sum("balance_change").alias("balance_change"),
-         F.sum("hour").alias("timestamp"),
-      )
-     )
+
+table_name = 'zetadex_feature_store.agg_funding'
+
+agg_funding_df = spark.table("zetadex_mainnet.agg_funding_rate_1h")\
+    .withColumn("ddb_key", F.concat(F.col("margin_account"), F.lit("#"), F.col("hour")))
 agg_funding_df.show()
+
+try:
+    result = fs.get_table(table_name)
+    print(result)
+    print('Table Already Exists...')
+except ValueError:
+    print('Creating New Table...')
+    fs.create_table(
+        name=table_name,
+        primary_keys="ddb_key",
+        df=agg_funding_df,
+        description=f"1h aggregated funding"
+    )
+except Exception:
+    print('Table Already Exists...')
+
 # Write new results to table
 fs.write_table(
-  name='zetadex_feature_store.agg_funding',
+  name=table_name,
   df=agg_funding_df,
   mode="merge",
 )
 
 fs.publish_table(
-  name='zetadex_feature_store.agg_funding',
+  name=table_name,
   online_store=online_store,
 #   filter_condition=f"date_ = '{current_date}' and hour_ = '{current_hour}'",
   features=[
+    'ddb_key',
     'asset',
     'margin_account',
+    'pubkey',
     'balance_change',
-    'timestamp'],
+    'hour'],
   mode='merge'
 )
 
