@@ -50,6 +50,52 @@ underlyings = ['SOL', 'BTC', 'ETH']
 
 # COMMAND ----------
 
+# DBTITLE 1,zetadex_feature_store.agg_funding
+# DBTITLE 1,zetadex_feature_store.agg_funding (ALL)
+# No transformations, just use the 'agg_funding_rate_1h' table
+
+table_name = 'zetadex_feature_store.agg_funding'
+
+agg_funding_df = spark.table("zetadex_mainnet.agg_funding_rate_1h")\
+    .withColumn("ddb_key", F.concat(F.col("margin_account"), F.lit("#"), F.col("hour")))
+agg_funding_df.show()
+
+try:
+    result = fs.get_table(table_name)
+    print(result)
+    print('Table Already Exists...')
+except Exception:
+    print('Creating New Table...')
+    fs.create_table(
+        name=table_name,
+        primary_keys="ddb_key",
+        df=agg_funding_df,
+        description=f"1h aggregated funding"
+    )
+
+# Write new results to table
+fs.write_table(
+  name=table_name,
+  df=agg_funding_df,
+  mode="merge",
+)
+
+fs.publish_table(
+  name=table_name,
+  online_store=online_store,
+#   filter_condition=f"date_ = '{current_date}' and hour_ = '{current_hour}'",
+  features=[
+    'ddb_key',
+    'asset',
+    'margin_account',
+    'pubkey',
+    'balance_change',
+    'hour'],
+  mode='merge'
+)
+
+# COMMAND ----------
+
 # DBTITLE 1,zetadex_mainnet.agg_pnl
 # fs.register_table(
 #   delta_table="zetadex_mainnet.agg_pnl",
@@ -147,7 +193,7 @@ for underlying in underlyings:
         result = fs.get_table(table_name)
         print(result)
         print('Table Already Exists...')
-    except ValueError:
+    except Exception:
         print('Creating New Table...')
         fs.create_table(
             name=table_name,
@@ -156,9 +202,6 @@ for underlying in underlyings:
             partition_columns="date_",
             description=f"Rolling 24hr trade summary metrics {underlying}",
         )
-    except Exception:
-        print('Table Already Exists...')
-        pass
 
     # Write new results to table
     fs.write_table(
@@ -216,7 +259,7 @@ for underlying in underlyings:
         result = fs.get_table(table_name)
         print(result)
         print('Table Already Exists...')
-    except ValueError:
+    except Exception:
         print('Creating New Table...')
         fs.create_table(
             name=table_name,
@@ -224,9 +267,6 @@ for underlying in underlyings:
             df=agg_trades_24h_rolling_df_market,
             description=f"Rolling 24hr volumes per market {table_name}",
         )
-    except Exception:
-        print('Table Already Exists...')
-        pass
 
     # Write new results to table
     fs.write_table(
@@ -270,7 +310,7 @@ try:
     result = fs.get_table(table_name)
     print(result)
     print('Table Already Exists...')
-except ValueError:
+except Exception:
     print('Creating New Table...')
     fs.create_table(
         name=table_name,
@@ -278,8 +318,6 @@ except ValueError:
         df=agg_surfaces_expiry_1h_df,
         description="Aggregated surfaces expiry 1h",
     )
-except Exception:
-    print('Table Already Exists...')
 
 # Write new results to table
 fs.write_table(
@@ -373,15 +411,23 @@ print(put_call_ratio)
 # agg_prices_market_total_puts.show()
 # agg_prices_market_total_calls.show()
 
-agg_prices_market_total_df = agg_prices_market_total_df.withColumn("put_call_ratio", F.lit(put_call_ratio))
+
+
+agg_prices_market_total_df = agg_prices_market_total_df.withColumn("put_call_ratio", F.lit(put_call_ratio).cast("double"))
 agg_prices_market_total_df.show()
 
-fs.create_table(
-    name='zetadex_feature_store.agg_prices_market_oi',
-    primary_keys="timestamp",
-    df=agg_prices_market_total_df,
-    description="Aggregated total open interest",
-)
+try:
+    result = fs.get_table('zetadex_feature_store.agg_prices_market_oi')
+    print(result)
+    print('Table Already Exists...')
+except Exception:
+    print('Creating New Table...')
+    fs.create_table(
+        name='zetadex_feature_store.agg_prices_market_oi',
+        primary_keys="timestamp",
+        df=agg_prices_market_total_df,
+        description="Aggregated total open interest",
+    )
 
 # Write new results to table
 fs.write_table(
@@ -423,13 +469,14 @@ for underlying in underlyings:
     print(put_call_ratio_underlying)
 
     agg_prices_market_total_df_underlying = agg_prices_market_total_df_underlying.withColumn("put_call_ratio", F.lit(put_call_ratio_underlying).cast("double"))
+    agg_prices_market_total_df_underlying.withColumn("put_call_ratio", agg_prices_market_total_df_underlying.put_call_ratio.cast('double'))
     agg_prices_market_total_df_underlying.show()
 
     try:
         result = fs.get_table(table_name)
         print(result)
         print('Table Already Exists...')
-    except ValueError:
+    except Exception:
         print('Creating New Table...')
         fs.create_table(
             name=table_name,
@@ -437,8 +484,6 @@ for underlying in underlyings:
             df=agg_prices_market_total_df_underlying,
             description=f"Aggregated total open interest {underlying}",
         )
-    except Exception:
-        print('Table Already Exists...')
 
     # Write new results to table
     fs.write_table(
@@ -483,7 +528,7 @@ for underlying in underlyings:
         result = fs.get_table(table_name)
         print(result)
         print('Table Already Exists...')
-    except ValueError:
+    except Exception:
         print('Creating New Table...')
         fs.create_table(
             name=table_name,
@@ -492,9 +537,6 @@ for underlying in underlyings:
             partition_columns="date_",
             description=f"Rolling 24hr trade summary metrics {underlying}",
         )
-    except Exception:
-        print('Table Already Exists...')
-        pass
 
     # Write new results to table
     fs.write_table(
@@ -539,7 +581,7 @@ for underlying in underlyings:
         result = fs.get_table(table_name)
         print(result)
         print('Table Already Exists...')
-    except ValueError:
+    except Exception:
         print('Creating New Table...')
         fs.create_table(
             name=table_name,
@@ -547,8 +589,6 @@ for underlying in underlyings:
             df=agg_prices_market_total_df_underlying,
             description=f"Aggregated total open interest {underlying}",
         )
-    except Exception:
-        print('Table Already Exists...')
 
     # Write new results to table
     fs.write_table(
@@ -562,3 +602,99 @@ for underlying in underlyings:
       online_store=online_store,
       mode='merge'
     )
+
+# COMMAND ----------
+
+# DBTITLE 1,Rewards: Maker/Taker/Referee/Referrer Agg Epoch User
+tables = ["maker", "taker", "referee", "referrer"]
+for item in tables:
+    table_name = f"zetadex_feature_store.agg_{item}_rewards_epoch_user"
+    spark_table_name = f"zetadex_mainnet.agg_{item}_rewards_epoch_user"
+    row1 = (spark.table(spark_table_name).agg({"epoch": "max"}).collect())[0]
+    print(row1["max(epoch)"])
+    if item == "maker" or item == "taker":
+        user = "user"
+    else:
+        user = item
+
+    latest_rewards_df = \
+    (spark.table(spark_table_name).filter(F.col("epoch") == row1["max(epoch)"]).withColumnRenamed(user, "pubkey"))
+
+
+    latest_rewards_df.show()
+
+    try:
+        result = fs.get_table(table_name)
+        print(result)
+        print(f'Table ({table_name}) Already Exists...')
+    except Exception:
+        print('Creating New Table...')
+        fs.create_table(
+            name=table_name,
+            primary_keys="pubkey",
+            df=latest_rewards_df,
+            description=f"Latest Agg {item} Rewards Epoch User"
+        )
+
+    # Write new results to table
+    fs.write_table(
+        name=table_name,
+        df=latest_rewards_df,
+        mode="merge",
+    )
+
+    fs.publish_table(
+        name=table_name,
+        online_store=online_store,
+        mode='merge'
+    )
+
+
+
+# COMMAND ----------
+
+# DBTITLE 1,Rewards: Maker/Taker/Referee/Referrer Agg Epoch User Historical
+tables = ["maker", "taker", "referee", "referrer"]
+for item in tables:
+    table_name = f"zetadex_feature_store.agg_{item}_rewards_epoch_user_historical"
+    spark_table_name = f"zetadex_mainnet.agg_{item}_rewards_epoch_user"
+
+    if item == "maker" or item == "taker":
+        user = "user"
+    else:
+        user = item
+
+    historical_rewards_df = \
+    (spark.table(spark_table_name)
+    .withColumn("pubkey_epoch", F.concat(F.col(user), F.lit("#"), F.unix_timestamp(F.col("epoch"))))
+    .withColumnRenamed(user, "pubkey"))
+
+    historical_rewards_df.show()
+
+    try:
+        result = fs.get_table(table_name)
+        print(result)
+        print(f'Table ({table_name}) Already Exists...')
+    except Exception:
+        print('Creating New Table...')
+        fs.create_table(
+            name=table_name,
+            primary_keys="pubkey_epoch",
+            df=historical_rewards_df,
+            description=f"Rewards Epoch {item} User Historical Data"
+        )
+
+    # Write new results to table
+    fs.write_table(
+        name=table_name,
+        df=historical_rewards_df,
+        mode="merge",
+    )
+
+    fs.publish_table(
+        name=table_name,
+        online_store=online_store,
+        mode='merge'
+    )
+
+

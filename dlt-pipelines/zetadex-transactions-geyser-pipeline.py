@@ -152,6 +152,7 @@ def raw_transactions_geyser():
            .option("partitionColumns", "year,month,day,hour")
            .schema(transactions_schema)
            .load(join(BASE_PATH_LANDED,TRANSACTIONS_TABLE,"data"))
+           .dropDuplicates(["signature"])
           )
 
 # COMMAND ----------
@@ -177,11 +178,11 @@ def place_trade_event_merge(arr):
         return p
 
 @dlt.view
-def zetagroup_mapping():
+def zetagroup_mapping_v():
     return spark.table(f"zetadex_{NETWORK}.zetagroup_mapping")
 
 @dlt.view
-def cleaned_markets():
+def cleaned_markets_v():
     return spark.table(f"zetadex_{NETWORK}.cleaned_markets")
 
 # Transactions
@@ -197,7 +198,7 @@ def cleaned_markets():
 def cleaned_transactions_geyser():
     return (dlt.read_stream("raw_transactions_geyser")
            .withWatermark("block_time", "1 hour")
-           .dropDuplicates(["signature"])
+        #    .dropDuplicates(["signature"])
            .filter("is_successful")
            .drop("year", "month", "day", "hour")
            .withColumn("date_", F.to_date("block_time"))
@@ -215,7 +216,7 @@ def cleaned_transactions_geyser():
     path=join(BASE_PATH_TRANSFORMED,TRANSACTIONS_TABLE,"cleaned-ix-deposit")
 )
 def cleaned_ix_deposit_geyser():
-    zetagroup_mapping_df = dlt.read("zetagroup_mapping")
+    zetagroup_mapping_df = dlt.read("zetagroup_mapping_v")
     return (dlt.read_stream("cleaned_transactions_geyser")
            .withWatermark("block_time", "1 hour")
            .select("*", F.posexplode("instructions").alias("instruction_index", "instruction"))
@@ -248,7 +249,7 @@ def cleaned_ix_deposit_geyser():
     path=join(BASE_PATH_TRANSFORMED,TRANSACTIONS_TABLE,"cleaned-ix-withdraw")
 )
 def cleaned_ix_withdraw_geyser():
-    zetagroup_mapping_df = dlt.read("zetagroup_mapping")
+    zetagroup_mapping_df = dlt.read("zetagroup_mapping_v")
     return (dlt.read_stream("cleaned_transactions_geyser")
        .withWatermark("block_time", "1 hour")
        .select("*", F.posexplode("instructions").alias("instruction_index", "instruction"))
@@ -277,11 +278,11 @@ def cleaned_ix_withdraw_geyser():
         "quality":"silver", 
         "pipelines.autoOptimize.zOrderCols":"block_time"
     },
-    partition_cols=["date_", "underlying"],
+    partition_cols=["date_", "underlying", "expiry", "strike", "kind"],
     path=join(BASE_PATH_TRANSFORMED,TRANSACTIONS_TABLE,"cleaned-ix-place-order")
 )
 def cleaned_ix_place_order_geyser():
-    markets_df = dlt.read("cleaned_markets")
+    markets_df = dlt.read("cleaned_markets_v")
     return (dlt.read_stream("cleaned_transactions_geyser")
            .withWatermark("block_time", "1 hour")
            .select("*", F.posexplode("instructions").alias("instruction_index", "instruction"))
@@ -324,16 +325,16 @@ def cleaned_ix_place_order_geyser():
         "quality":"silver", 
         "pipelines.autoOptimize.zOrderCols":"block_time"
     },
-    partition_cols=["date_", "underlying"],
+    partition_cols=["date_", "underlying", "expiry", "strike", "kind"],
     path=join(BASE_PATH_TRANSFORMED,TRANSACTIONS_TABLE,"cleaned-ix-order-complete")
 )
 def cleaned_ix_order_complete_geyser():
-    markets_df = dlt.read("cleaned_markets")
+    markets_df = dlt.read("cleaned_markets_v")
     return (dlt.read_stream("cleaned_transactions_geyser")
            .withWatermark("block_time", "1 hour")
            .select("*", F.posexplode("instructions").alias("instruction_index", "instruction"))
            .filter((F.col("instruction.name") == 'crank_event_queue') # maker fill
-                   | F.col("instruction.name").startswith('place_order') # taker fill
+                   | F.col("instruction.name").rlike("^place_(perp_)?order(_v[0-9]+)?$") # taker fill
                    | F.col("instruction.name").contains('cancel') # cancel
                   )
            .withColumn("event", F.explode("instruction.events"))
@@ -377,7 +378,7 @@ def cleaned_ix_order_complete_geyser():
     path=join(BASE_PATH_TRANSFORMED,TRANSACTIONS_TABLE,"cleaned-ix-liquidate")
 )
 def cleaned_ix_liquidate_geyser():
-    markets_df = dlt.read("cleaned_markets")
+    markets_df = dlt.read("cleaned_markets_v")
     return (dlt.read_stream("cleaned_transactions_geyser")
            .withWatermark("block_time", "1 hour")
            .select("*", F.posexplode("instructions").alias("instruction_index", "instruction"))
@@ -429,7 +430,7 @@ def cleaned_ix_liquidate_geyser():
     path=join(BASE_PATH_TRANSFORMED,TRANSACTIONS_TABLE,"cleaned-ix-trade")
 )
 def cleaned_ix_trade_geyser():
-    markets_df = dlt.read("cleaned_markets")
+    markets_df = dlt.read("cleaned_markets_v")
     df = (dlt.read_stream("cleaned_transactions_geyser")
            .withWatermark("block_time", "1 hour")
            .select("*", F.posexplode("instructions").alias("instruction_index", "instruction"))
@@ -441,7 +442,7 @@ def cleaned_ix_trade_geyser():
         .withColumn("maker_taker", F.lit("maker"))
               )
     taker_df = (df
-    .filter(F.col("instruction.name").startswith('place_order'))
+    .filter(F.col("instruction.name").rlike("^place_(perp_)?order(_v[0-9]+)?$"))
     .filter((F.array_contains("instruction.events.name", F.lit('trade_event'))) | (F.array_contains("instruction.events.name", F.lit('trade_event_v2')))) # filter to only taker orders that trade
     .withColumn("event", place_trade_event_merge("instruction.events"))
     .withColumn("maker_taker", F.lit("taker"))
@@ -466,7 +467,7 @@ def cleaned_ix_trade_geyser():
                    ((F.col("event.event.cost_of_trades") / F.col("event.event.size")) / (PRICE_FACTOR/SIZE_FACTOR)).alias("price"),
                    (F.col("event.event.size") / SIZE_FACTOR).alias("size"),
                    F.when(F.col("event.event.is_bid").cast("boolean"), "bid").otherwise("ask").alias("side"),
-                   F.when(F.col("instruction.name").startswith('place_order'), "taker").otherwise("maker")
+                   F.when(F.col("instruction.name").rlike("^place_(perp_)?order(_v[0-9]+)?$"), "taker").otherwise("maker")
                     # F.when(F.coalesce(F.col("event.event.isTaker"), F.lit("False")).cast("boolean"), "taker")
                     #                 .otherwise("maker")
                     .alias("maker_taker"),
@@ -497,7 +498,7 @@ def cleaned_ix_trade_geyser():
     path=join(BASE_PATH_TRANSFORMED,TRANSACTIONS_TABLE,"cleaned-ix-position-movement")
 )
 def cleaned_ix_position_movement_geyser():
-    zetagroup_mapping_df = dlt.read("zetagroup_mapping")
+    zetagroup_mapping_df = dlt.read("zetagroup_mapping_v")
     return (dlt.read_stream("cleaned_transactions_geyser")
            .withWatermark("block_time", "1 hour")
            .select("*", F.posexplode("instructions").alias("instruction_index", "instruction"))
@@ -536,7 +537,7 @@ def cleaned_ix_position_movement_geyser():
     path=join(BASE_PATH_TRANSFORMED,TRANSACTIONS_TABLE,"cleaned-ix-settle-positions")
 )
 def cleaned_ix_settle_positions_geyser():
-    zetagroup_mapping_df = dlt.read("zetagroup_mapping")
+    zetagroup_mapping_df = dlt.read("zetagroup_mapping_v")
     return (dlt.read_stream("cleaned_transactions_geyser")
            .withWatermark("block_time", "1 hour")
            .select("*", F.posexplode("instructions").alias("instruction_index", "instruction"))
@@ -556,6 +557,37 @@ def cleaned_ix_settle_positions_geyser():
            .withColumn("date_", F.to_date("block_time"))
            .withColumn("hour_", F.date_format("block_time", "HH").cast("int"))
             )
+
+# COMMAND ----------
+
+# DBTITLE 1,Gold
+@dlt.table(
+    comment='Hourly aggregated data for funding rate',
+    table_properties={
+        "quality": "gold",
+        "pipelines.autoOptimize.zOrderCols": "hour",
+    },
+    partition_cols=["asset"],
+    path=join(BASE_PATH_TRANSFORMED, TRANSACTIONS_TABLE, "agg-1h-funding-rate")
+)
+def agg_funding_rate_1h():
+    return (
+        dlt.read_stream("cleaned_transactions_geyser")
+        .withWatermark("block_time","1 hour")
+        .withColumn("instruction", F.explode("instructions"))
+        .withColumn("event", F.explode("instruction.events"))
+        .filter("event.name == 'apply_funding_event'")
+        .groupBy(
+            F.col("event.event.user").alias("pubkey"),
+            "event.event.margin_account",
+            F.date_trunc("hour", "block_time").alias("hour"),
+            "event.event.asset"
+        )
+        .agg(
+            (F.sum(F.col("event.event.balance_change").cast("decimal(10,6)") / float(PRICE_FACTOR))).alias("balance_change")
+        )
+        .filter("balance_change <> 0")
+    )
 
 # COMMAND ----------
 
