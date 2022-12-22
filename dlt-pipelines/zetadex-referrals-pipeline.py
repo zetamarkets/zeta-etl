@@ -1,5 +1,4 @@
 # Databricks notebook source
-# Databricks notebook source
 dbutils.widgets.dropdown("network", "devnet", ["devnet", "mainnet"], "Network")
 # NETWORK = dbutils.widgets.get("network")
 NETWORK = spark.conf.get("pipeline.network")
