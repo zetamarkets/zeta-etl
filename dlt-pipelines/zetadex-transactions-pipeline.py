@@ -1,5 +1,4 @@
 # Databricks notebook source
-# Databricks notebook source
 dbutils.widgets.dropdown("network", "devnet", ["devnet", "mainnet"], "Network")
 # NETWORK = dbutils.widgets.get("network")
 NETWORK = spark.conf.get("pipeline.network")
@@ -50,6 +49,8 @@ active_timestamp timestamp,
 expiry_timestamp timestamp, 
 strike double, 
 kind string, 
+perp_sync_queue_head int,
+perp_sync_queue_length int,
 market_pub_key string, 
 timestamp timestamp, 
 slot bigint
@@ -267,7 +268,7 @@ def cleaned_ix_place_order():
     return (dlt.read_stream("cleaned_transactions")
            .withWatermark("block_timestamp", "1 hour")
            .select("*", F.posexplode("instructions").alias("instruction_index", "instruction"))
-           .filter(F.col("instruction.name").startswith('placeOrder'))
+           .filter(F.col("instruction.name").rlike("^place_(perp_)?order(_v[0-9]+)?$")) # place_order and place_perp_order variants
            .join(markets_df, 
                  (F.col("instruction.named_accounts.market") == markets_df.market_pub_key)
                   & F.col("block_timestamp").between(markets_df.active_timestamp, markets_df.expiry_timestamp),
@@ -463,64 +464,6 @@ def raw_pnl():
 
 # COMMAND ----------
 
-# @dlt.table(
-#     comment="Cleaned data for margin account profit and loss",
-#     table_properties={
-#         "quality":"silver", 
-#         "pipelines.autoOptimize.zOrderCols":"owner_pub_key"
-#     },
-#     partition_cols=["date_"],
-#     path=join(BASE_PATH_TRANSFORMED,MARGIN_ACCOUNTS_PNL_TABLE,"cleaned")
-# )
-# def cleaned_pnl():
-#     deposits_df = (dlt.read_stream("agg_ix_deposit_u1h")
-#                  .withColumn("date_hour", F.date_trunc("hour", F.col("timestamp_window.start")))
-#                  .withWatermark("date_hour", "1 hour")
-#                  .drop("date_","hour_")
-#                 )
-#     withdrawals_df = (dlt.read_stream("agg_ix_withdraw_u1h")
-#                  .withColumn("date_hour", F.date_trunc("hour", F.col("timestamp_window.start")))
-#                  .withWatermark("date_hour", "1 hour")
-#                  .drop("date_","hour_")
-#                 )
-#     return (dlt.read_stream("raw_pnl")
-#            .withWatermark("timestamp", "1 hour")
-#            .dropDuplicates(["underlying","year","month","day","hour"])
-#            .join(deposits_df.alias("d"),
-#               F.expr("""
-#                raw_pnl.underlying = d.underlying AND
-#                raw_pnl.owner_pub_key = d.owner_pub_key AND
-#                raw_pnl.timestamp >= d.date_hour AND raw_pnl.timestamp < d.date_hour + interval 1 hour
-#                """), 
-#               how="left")
-#            .join(withdrawals_df.alias("w"),
-#               F.expr("""
-#                raw_pnl.underlying = w.underlying AND
-#                raw_pnl.owner_pub_key = w.owner_pub_key AND
-#                raw_pnl.timestamp >= w.date_hour AND raw_pnl.timestamp < w.date_hour + interval 1 hour
-#                """), 
-#               how="left")
-# #            .withColumn("deposits", F.coalesce("deposits",F.lit(0)))
-# #            .withColumn("withdrawals", F.coalesce("withdrawals",F.lit(0)))
-#            .withColumn("pnl", F.col("balance") + F.col("unrealized_pnl") - (F.col("deposit_amount") - F.col("withdraw_amount")))
-#            .withColumn("date_", F.to_date("timestamp"))
-#            .withColumn("hour_", F.date_format("timestamp", "HH").cast("int"))
-#            .select(
-#                "raw_pnl.timestamp",
-#                "raw_pnl.underlying",
-#                "raw_pnl.owner_pub_key",
-#                "balance",
-#                "unrealized_pnl",
-#                "deposit_amount",
-#                "withdraw_amount",
-#                "pnl",
-#                "date_",
-#                "hour_"
-#            )
-#           )
-
-# COMMAND ----------
-
 @dlt.table(
     comment="Cleaned data for margin account profit and loss",
     table_properties={
@@ -580,69 +523,6 @@ def cleaned_pnl():
                "hour_"
            )
           )
-
-# COMMAND ----------
-
-# @dlt.table(
-#     comment="Cleaned data for margin account profit and loss",
-#     table_properties={
-#         "quality":"silver", 
-#         "pipelines.autoOptimize.zOrderCols":"owner_pub_key"
-#     },
-#     partition_cols=["date_"],
-#     path=join(BASE_PATH_TRANSFORMED,MARGIN_ACCOUNTS_PNL_TABLE,"cleaned")
-# )
-# def cleaned_pnl():
-#     deposits_df = (dlt.read_stream("cleaned_ix_deposit")
-#                  .withColumn("date_hour", F.date_trunc("hour", "block_timestamp"))
-#                  .withWatermark("date_hour", "1 hour")
-#                  .drop("date_","hour_")
-#                 )
-#     withdrawals_df = (dlt.read_stream("cleaned_ix_withdraw")
-#                  .withColumn("date_hour", F.date_trunc("hour", "block_timestamp"))
-#                  .withWatermark("date_hour", "1 hour")
-#                  .drop("date_","hour_")
-#                 )
-#     return (dlt.read_stream("raw_pnl")
-#            .withWatermark("timestamp", "1 hour")
-#            .dropDuplicates(["underlying","year","month","day","hour"])
-#            .join(deposits_df.alias("d"),
-#               F.expr("""
-#                raw_pnl.underlying = d.underlying AND
-#                raw_pnl.owner_pub_key = d.named_accounts.authority AND
-#                raw_pnl.timestamp >= d.date_hour AND raw_pnl.timestamp < d.date_hour + interval 1 hour
-#                """), 
-#               how="left")
-#            .join(withdrawals_df.alias("w"),
-#               F.expr("""
-#                raw_pnl.underlying = w.underlying AND
-#                raw_pnl.owner_pub_key = w.named_accounts.authority AND
-#                raw_pnl.timestamp >= w.date_hour AND raw_pnl.timestamp < w.date_hour + interval 1 hour
-#                """), 
-#               how="left")
-#             .groupBy(F.date_trunc("hour", "timestamp").alias("timestamp_hour"), "owner_pub_key", "raw_pnl.underlying")
-#             .agg(
-#                 F.first("balance").alias("balance"),
-#                 F.first("unrealized_pnl").alias("unrealized_pnl"),
-#                 F.sum("d.amount").alias("deposit_amount"),
-#                 F.sum("w.amount").alias("withdraw_amount")
-#              )
-#            .withColumn("pnl", F.col("balance") + F.col("unrealized_pnl") - (F.col("deposit_amount") - F.col("withdraw_amount")))
-#            .withColumn("date_", F.to_date("timestamp_hour"))
-#            .withColumn("hour_", F.date_format("timestamp_hour", "HH").cast("int"))
-#            .select(
-#                "timestamp_hour",
-#                "raw_pnl.underlying",
-#                "raw_pnl.owner_pub_key",
-#                "balance",
-#                "unrealized_pnl",
-#                "deposit_amount",
-#                "withdraw_amount",
-#                "pnl",
-#                "date_",
-#                "hour_"
-#            )
-#           )
 
 # COMMAND ----------
 

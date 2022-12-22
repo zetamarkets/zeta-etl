@@ -1,5 +1,4 @@
 # Databricks notebook source
-# Databricks notebook source
 dbutils.widgets.dropdown("network", "devnet", ["devnet", "mainnet"], "Network")
 # NETWORK = dbutils.widgets.get("network")
 NETWORK = spark.conf.get("pipeline.network")
@@ -170,7 +169,7 @@ def place_trade_event_merge(arr):
     for x in arr:
         if x.name == "place_order_event":
             p = x
-        elif x.name == "trade_event":
+        elif x.name.startswith("trade_event"):
             t = x
     if t is not None:
         return ('place_order_trade_event', {**p.event, **t.event})
@@ -286,7 +285,7 @@ def cleaned_ix_place_order_geyser():
     return (dlt.read_stream("cleaned_transactions_geyser")
            .withWatermark("block_time", "1 hour")
            .select("*", F.posexplode("instructions").alias("instruction_index", "instruction"))
-           .filter(F.col("instruction.name").startswith('place_order'))
+           .filter(F.col("instruction.name").rlike("^place_(perp_)?order(_v[0-9]+)?$")) # place_order and place_perp_order variants
            .withColumn("event", F.explode("instruction.events"))
            .filter("event.name == 'place_order_event'")
            .join(markets_df, 
@@ -416,7 +415,7 @@ def cleaned_ix_liquidate_geyser():
 
 # TAKER
 # ix.name == 'place_order*'
-# ix.events == 'place_order_event' | 'trade_event'
+# ix.events == 'place_order_event' | 'trade_event(_v2)'
 # [0] place_order_event, [1] trade_event
     
 # Trades
@@ -438,12 +437,12 @@ def cleaned_ix_trade_geyser():
     maker_df = (df
         .filter("instruction.name == 'crank_event_queue'")
         .withColumn("event", F.explode("instruction.events"))
-        .filter("event.name == 'trade_event'")
+        .filter(F.col("event.name").startswith('trade_event'))
         .withColumn("maker_taker", F.lit("maker"))
               )
     taker_df = (df
     .filter(F.col("instruction.name").startswith('place_order'))
-    .filter(F.array_contains("instruction.events.name", F.lit('trade_event'))) # filter to only taker orders that trade
+    .filter((F.array_contains("instruction.events.name", F.lit('trade_event'))) | (F.array_contains("instruction.events.name", F.lit('trade_event_v2')))) # filter to only taker orders that trade
     .withColumn("event", place_trade_event_merge("instruction.events"))
     .withColumn("maker_taker", F.lit("taker"))
            )
@@ -457,19 +456,24 @@ def cleaned_ix_trade_geyser():
                 )
             .select("signature",
                    "instruction_index",
-                   "underlying",
+                   F.coalesce("event.event.asset", "underlying").alias("underlying"),
                    F.col("expiry_timestamp").alias("expiry"),
                    "strike",
                    "kind",
                    "event.name",
+                   "event.event.user",
                    "event.event.margin_account",
                    ((F.col("event.event.cost_of_trades") / F.col("event.event.size")) / (PRICE_FACTOR/SIZE_FACTOR)).alias("price"),
                    (F.col("event.event.size") / SIZE_FACTOR).alias("size"),
                    F.when(F.col("event.event.is_bid").cast("boolean"), "bid").otherwise("ask").alias("side"),
-                   F.when(F.col("instruction.name") == 'crank_event_queue', "maker").otherwise("taker").alias("maker_taker"),
+                   F.when(F.col("instruction.name").startswith('place_order'), "taker").otherwise("maker")
+                    # F.when(F.coalesce(F.col("event.event.isTaker"), F.lit("False")).cast("boolean"), "taker")
+                    #                 .otherwise("maker")
+                    .alias("maker_taker"),
                    F.col("event.event.index").cast("smallint").alias("market_index"),
                    "event.event.client_order_id",
                    "event.event.order_id",
+                   "event.event.sequenceNumber",
                    "instruction.args.order_type",
                    "instruction.args.tag",
                    (F.col("event.event.fee") / PRICE_FACTOR).alias("trading_fee"), # not instrumented for maker yet (but is 0 currently)
@@ -552,3 +556,7 @@ def cleaned_ix_settle_positions_geyser():
            .withColumn("date_", F.to_date("block_time"))
            .withColumn("hour_", F.date_format("block_time", "HH").cast("int"))
             )
+
+# COMMAND ----------
+
+

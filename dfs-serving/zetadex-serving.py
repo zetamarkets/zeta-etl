@@ -11,6 +11,9 @@ import pyspark.sql.functions as F
 import pyspark.sql.types as T
 from pytz import timezone
 from datetime import datetime, timezone
+# from delta.tables import DeltaTable
+# delta = DeltaTable.forPath(spark, "zetadex_mainnet.agg_trades_market_1h") # or DeltaTable.forName
+# delta.upgradeTableProtocol(2, 5) # upgrades to readerVersion=2, writerVersion=5
 
 # COMMAND ----------
 
@@ -175,6 +178,76 @@ for underlying in underlyings:
         'premium_sum',
         'timestamp'],
       mode='merge'
+    )
+
+
+# COMMAND ----------
+
+# DBTITLE 1,zetadex_feature_store.agg_trades_24h_rolling_market
+for underlying in underlyings:
+    table_name = "zetadex_feature_store.agg_trades_24h_rolling_market_" + underlying.lower()
+    print(f"Underlying: {underlying}")
+    print(f"Table Name: {table_name}")
+
+    # On the fly transformation to get the last 24hrs volume from our 1h agg'ed tables
+    agg_trades_24h_rolling_df_market = \
+        (spark.table("zetadex_mainnet.agg_trades_market_1h")
+            .withColumn("ddb_key", F.concat(F.col("underlying"), F.lit("#"), F.unix_timestamp(F.col("expiry_timestamp")), F.lit("#"), F.col("kind"), F.lit("#"), F.col("strike")))
+            .filter(F.col("underlying") == underlying)
+            .filter(F.col("timestamp_window.start") >= (F.date_trunc("hour", F.current_timestamp()) - F.expr('INTERVAL 24 HOUR')))
+            .groupby("ddb_key")
+            .agg(
+                F.sum("trades_count").alias("trades_count"),
+                F.sum("volume").alias("volume"),
+                F.sum("notional_volume").alias("notional_volume"),
+                F.sum("premium_sum").alias("premium_sum"),
+                F.first("underlying"),
+                F.first("expiry_timestamp"),
+            )
+            .withColumnRenamed("first(underlying)", "underlying")
+            .withColumnRenamed("first(expiry_timestamp)", "expiry_timestamp")
+            .withColumn("timestamp", F.date_trunc("hour", F.current_timestamp()))
+            .withColumn("date_", F.to_date("timestamp"))
+            .withColumn("hour_", F.date_format("timestamp", "HH").cast("int"))
+            )
+    agg_trades_24h_rolling_df_market.show()
+
+    try:
+        result = fs.get_table(table_name)
+        print(result)
+        print('Table Already Exists...')
+    except ValueError:
+        print('Creating New Table...')
+        fs.create_table(
+            name=table_name,
+            primary_keys=["ddb_key"],
+            df=agg_trades_24h_rolling_df_market,
+            description=f"Rolling 24hr volumes per market {table_name}",
+        )
+    except Exception:
+        print('Table Already Exists...')
+        pass
+
+    # Write new results to table
+    fs.write_table(
+        name=table_name,
+        df=agg_trades_24h_rolling_df_market,
+        mode="merge",
+    )
+
+    fs.publish_table(
+        name=table_name,
+        online_store=online_store,
+        features=[
+        'ddb_key',
+        'trades_count',
+        'volume',
+        'notional_volume',
+        'premium_sum',
+        'timestamp',
+        'underlying',
+        'expiry_timestamp'],
+        mode='merge'
     )
 
 # COMMAND ----------
@@ -350,6 +423,116 @@ for underlying in underlyings:
     print(put_call_ratio_underlying)
 
     agg_prices_market_total_df_underlying = agg_prices_market_total_df_underlying.withColumn("put_call_ratio", F.lit(put_call_ratio_underlying).cast("double"))
+    agg_prices_market_total_df_underlying.show()
+
+    try:
+        result = fs.get_table(table_name)
+        print(result)
+        print('Table Already Exists...')
+    except ValueError:
+        print('Creating New Table...')
+        fs.create_table(
+            name=table_name,
+            primary_keys="timestamp",
+            df=agg_prices_market_total_df_underlying,
+            description=f"Aggregated total open interest {underlying}",
+        )
+    except Exception:
+        print('Table Already Exists...')
+
+    # Write new results to table
+    fs.write_table(
+      name=table_name,
+      df=agg_prices_market_total_df_underlying,
+      mode="merge",
+    )
+
+    fs.publish_table(
+      name=table_name,
+      online_store=online_store,
+      mode='merge'
+    )
+
+# COMMAND ----------
+
+# DBTITLE 1,Perp 24h Volume (zetadex_feature_store.agg_trades_24h_rolling_perp_<underlying>)
+for underlying in underlyings:
+    table_name = "zetadex_feature_store.agg_trades_24h_rolling_perp_" + underlying.lower()
+    print(f"Underlying: {underlying}")
+    print(f"Table Name: {table_name}")
+
+    # On the fly transformation to get the last 24hrs volume from our 1h agg'ed tables
+    agg_trades_24h_rolling_df_perp_underlying = \
+        (spark.table("zetadex_mainnet.agg_trades_market_1h")
+         .filter(F.col("timestamp_window.start") >= (F.date_trunc("hour", F.current_timestamp()) - F.expr('INTERVAL 24 HOUR')))
+         .filter(F.col("underlying") == underlying)
+         .filter(F.col("kind") == "perp")
+         .agg(
+             F.sum("trades_count").alias("trades_count"),
+             F.sum("volume").alias("volume"),
+             F.sum("notional_volume").alias("notional_volume"),
+             F.sum("premium_sum").alias("premium_sum"),
+          )
+          .withColumn("timestamp", F.date_trunc("hour", F.current_timestamp()))
+          .withColumn("date_", F.to_date("timestamp"))
+          .withColumn("hour_", F.date_format("timestamp", "HH").cast("int"))
+         )
+    agg_trades_24h_rolling_df_perp_underlying.show()
+
+    try:
+        result = fs.get_table(table_name)
+        print(result)
+        print('Table Already Exists...')
+    except ValueError:
+        print('Creating New Table...')
+        fs.create_table(
+            name=table_name,
+            primary_keys=["timestamp"],
+            df=agg_trades_24h_rolling_df_perp_underlying,
+            partition_columns="date_",
+            description=f"Rolling 24hr trade summary metrics {underlying}",
+        )
+    except Exception:
+        print('Table Already Exists...')
+        pass
+
+    # Write new results to table
+    fs.write_table(
+      name=table_name,
+      df=agg_trades_24h_rolling_df_perp_underlying,
+      mode="merge",
+    )
+
+    fs.publish_table(
+      name=table_name,
+      online_store=online_store,
+    #   filter_condition=f"date_ = '{current_date}' and hour_ = '{current_hour}'",
+      features=[
+        'trades_count',
+        'volume',
+        'notional_volume',
+        'premium_sum',
+        'timestamp'],
+      mode='merge'
+    )
+
+
+# COMMAND ----------
+
+# DBTITLE 1,Perp OI (zetadex_feature_store.agg_prices_market_oi_perp_<underlying>)
+for underlying in underlyings:
+    table_name = 'zetadex_feature_store.agg_prices_market_oi_perp_' + underlying.lower()
+    print(f"Underlying: {underlying}")
+    print(f"Table Name: {table_name}")
+
+    row1 = (spark.table("zetadex_mainnet.agg_prices_market_1h").agg({"timestamp": "max"}).collect())[0]
+    print(row1["max(timestamp)"])
+
+    agg_prices_market_total_df_underlying = (spark.table("zetadex_mainnet.agg_prices_market_1h")
+        .filter(F.col("kind") == "perp")
+        .filter(F.col("timestamp") == row1["max(timestamp)"])
+        .filter(F.col("underlying") == underlying).groupBy().sum("open_interest", "open_interest_usd").drop("sum(strike)", "sum(theo)", "sum(delta)", "sum(vega)", "sum(sigma)", "sum(hour_)").withColumn("timestamp", F.lit(row1["max(timestamp)"])).withColumnRenamed("sum(open_interest)", "total_open_interest").withColumnRenamed("sum(open_interest_usd)", "total_open_interest_usd"))
+
     agg_prices_market_total_df_underlying.show()
 
     try:
