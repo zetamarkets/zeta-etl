@@ -568,7 +568,7 @@ def cleaned_ix_settle_positions_geyser():
         "pipelines.autoOptimize.zOrderCols": "hour",
     },
     partition_cols=["asset"],
-    path=join(BASE_PATH_TRANSFORMED, TRANSACTIONS_TABLE, "agg-1h-funding-rate")
+    path=join(BASE_PATH_TRANSFORMED, TRANSACTIONS_TABLE, "agg-funding-rate-1h")
 )
 def agg_funding_rate_1h():
     return (
