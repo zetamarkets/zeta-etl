@@ -580,7 +580,7 @@ def agg_funding_rate_1h():
         .groupBy(
             F.col("event.event.user").alias("pubkey"),
             "event.event.margin_account",
-            F.date_trunc("hour", "block_time").alias("hour"),
+            F.date_trunc("hour", "block_time").alias("timestamp_hour"),
             "event.event.asset"
         )
         .agg(
