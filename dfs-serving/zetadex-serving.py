@@ -621,13 +621,9 @@ for item in tables:
     (spark.table(spark_table_name).filter(F.col("epoch") == row1["max(epoch)"]).withColumnRenamed(user, "pubkey"))
 
 
-    latest_rewards_df.show()
 
+    latest_rewards_df.show()
     try:
-        result = fs.get_table(table_name)
-        print(result)
-        print(f'Table ({table_name}) Already Exists...')
-    except Exception:
         print('Creating New Table...')
         fs.create_table(
             name=table_name,
@@ -635,6 +631,8 @@ for item in tables:
             df=latest_rewards_df,
             description=f"Latest Agg {item} Rewards Epoch User"
         )
+    except Exception:
+        print(f'Table ({table_name}) Already Exists...')
 
     # Write new results to table
     fs.write_table(
@@ -670,12 +668,8 @@ for item in tables:
     .withColumnRenamed(user, "pubkey"))
 
     historical_rewards_df.show()
-
+    
     try:
-        result = fs.get_table(table_name)
-        print(result)
-        print(f'Table ({table_name}) Already Exists...')
-    except Exception:
         print('Creating New Table...')
         fs.create_table(
             name=table_name,
@@ -683,6 +677,10 @@ for item in tables:
             df=historical_rewards_df,
             description=f"Rewards Epoch {item} User Historical Data"
         )
+    except Exception:
+        print(f'Table ({table_name}) Already Exists...')
+
+
 
     # Write new results to table
     fs.write_table(
