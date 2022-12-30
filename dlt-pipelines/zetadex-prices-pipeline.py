@@ -703,12 +703,12 @@ def agg_referrer_rewards_epoch_user():
     w_referrer_30d = (
         Window.partitionBy("referrer")
         .orderBy(F.unix_timestamp("epoch"))
-        .rangeBetween(-days(30), Window.currentRow)
+        .rangeBetween(-days(30), 0) # last 30 days
     )
     w_cumsum = (
         Window.partitionBy("referrer")
         .orderBy("epoch")
-        .rangeBetween(Window.unboundedPreceding, 0)
+        .rowsBetween(Window.unboundedPreceding, Window.currentRow) # cumulative
     )
     referrer_rewards = (
         cleaned_trades_rewards_v.filter("epoch >= '2022-09-01'")
@@ -802,7 +802,7 @@ def agg_referee_rewards_epoch_user():
     w_cumsum = (
         Window.partitionBy("referee")
         .orderBy("epoch")
-        .rangeBetween(Window.unboundedPreceding, 0)
+        .rowsBetween(Window.unboundedPreceding, Window.currentRow) # cumulative
     )
     referee_rewards = (
         cleaned_trades_rewards_v.filter("epoch >= '2022-09-01'")
