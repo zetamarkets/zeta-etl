@@ -565,10 +565,10 @@ def cleaned_ix_settle_positions_geyser():
     comment='Hourly aggregated data for funding rate',
     table_properties={
         "quality": "gold",
-        "pipelines.autoOptimize.zOrderCols": "hour",
+        "pipelines.autoOptimize.zOrderCols": "timestamp",
     },
     partition_cols=["asset"],
-    path=join(BASE_PATH_TRANSFORMED, TRANSACTIONS_TABLE, "agg-1h-funding-rate")
+    path=join(BASE_PATH_TRANSFORMED, TRANSACTIONS_TABLE, "agg-funding-rate-1h")
 )
 def agg_funding_rate_1h():
     return (
@@ -580,11 +580,11 @@ def agg_funding_rate_1h():
         .groupBy(
             F.col("event.event.user").alias("pubkey"),
             "event.event.margin_account",
-            F.date_trunc("hour", "block_time").alias("hour"),
+            F.date_trunc("hour", "block_time").alias("timestamp"),
             "event.event.asset"
         )
         .agg(
-            (F.sum(F.col("event.event.balance_change").cast("decimal(10,6)") / float(PRICE_FACTOR))).alias("balance_change")
+            (F.sum(F.col("event.event.balance_change") / PRICE_FACTOR)).alias("balance_change")
         )
         .filter("balance_change <> 0")
     )
