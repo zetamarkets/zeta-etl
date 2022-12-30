@@ -589,6 +589,4 @@ def agg_funding_rate_1h():
         .filter("balance_change <> 0")
     )
 
-# COMMAND ----------
-
 
