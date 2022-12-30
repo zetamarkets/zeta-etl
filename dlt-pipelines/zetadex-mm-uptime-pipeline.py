@@ -14,12 +14,6 @@ import dlt
 
 # COMMAND ----------
 
-from datetime import datetime, timezone
-current_date = str(datetime.now(timezone.utc).date())
-current_hour = datetime.now(timezone.utc).hour
-
-# COMMAND ----------
-
 MARKET_MAKER_TABLE = "market_maker_quotes"
 
 # COMMAND ----------
@@ -46,7 +40,7 @@ BASE_PATH_TRANSFORMED = join("/mnt", S3_BUCKET_TRANSFORMED)
     comment="Cleaned data for market maker quotes",
     table_properties={
         "quality": "silver",
-        #"pipelines.autoOptimize.zOrderCols": "timestamp",
+        "pipelines.autoOptimize.zOrderCols": "start_quote_interval",
     },
     partition_cols=["underlying","expiry","strike","kind"],
     path=join(BASE_PATH_TRANSFORMED, MARKET_MAKER_TABLE, "cleaned"),
