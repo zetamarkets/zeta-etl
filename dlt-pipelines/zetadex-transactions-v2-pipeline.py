@@ -91,7 +91,7 @@ def raw_transactions():
         .option("partitionColumns", "year,month,day,hour")
         .schema(transactions_schema)
         .load(join(BASE_PATH_LANDED, TRANSACTIONS_TABLE, "data"))
-        # .dropDuplicates(["signature"])
+        .dropDuplicates(["signature"])
     )
 
 # COMMAND ----------
@@ -143,7 +143,7 @@ def cleaned_transactions():
     return (
         dlt.read_stream("raw_transactions")
         .withWatermark("block_time", "1 hour")
-        .dropDuplicates(["signature"])
+        # .dropDuplicates(["signature"])
         .filter("is_successful")
         .drop("year", "month", "day", "hour")
         .withColumn("date_", F.to_date("block_time"))
