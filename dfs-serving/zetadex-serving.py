@@ -50,7 +50,6 @@ underlyings = ['SOL', 'BTC', 'ETH']
 
 # COMMAND ----------
 
-# DBTITLE 1,zetadex_feature_store.agg_funding
 # DBTITLE 1,zetadex_feature_store.agg_funding (ALL)
 # No transformations, just use the 'agg_funding_rate_1h' table
 

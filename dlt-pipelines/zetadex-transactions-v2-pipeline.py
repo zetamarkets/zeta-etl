@@ -55,6 +55,7 @@ instructions array<
             named map<string, string>,
             remaining array<string>
         >,
+        program_id: string,
         events array<
             struct<
                 name string,
@@ -91,7 +92,7 @@ def raw_transactions():
         .option("partitionColumns", "year,month,day,hour")
         .schema(transactions_schema)
         .load(join(BASE_PATH_LANDED, TRANSACTIONS_TABLE, "data"))
-        .dropDuplicates(["signature"])
+        # .dropDuplicates(["signature"])
     )
 
 # COMMAND ----------
@@ -113,7 +114,7 @@ def place_trade_event_merge(arr):
             p = x
         elif x.name.startswith("trade_event"):
             t = x
-    if t is not None:
+    if t is not None and p is not None:
         return ("place_order_trade_event", {**p.event, **t.event})
     else:
         return p
@@ -143,8 +144,8 @@ def cleaned_transactions():
     return (
         dlt.read_stream("raw_transactions")
         .withWatermark("block_time", "1 hour")
-        # .dropDuplicates(["signature"])
         .filter("is_successful")
+        .dropDuplicates(["signature"])
         .drop("year", "month", "day", "hour")
         .withColumn("date_", F.to_date("block_time"))
         .withColumn("hour_", F.date_format("block_time", "HH").cast("int"))
@@ -474,7 +475,7 @@ def cleaned_ix_trade():
         .select(
             "signature",
             "instruction_index",
-            F.coalesce("event.event.asset", "underlying").alias("underlying"),
+            F.coalesce("underlying", "event.event.asset").alias("underlying"),
             F.col("expiry_timestamp").alias("expiry"),
             "strike",
             "kind",
@@ -617,4 +618,31 @@ def cleaned_ix_settle_positions():
 
 # COMMAND ----------
 
+@dlt.table(
+    comment='Hourly aggregated data for funding rate',
+    table_properties={
+        "quality": "gold",
+        "pipelines.autoOptimize.zOrderCols": "hour", # change
+    },
+    partition_cols=["asset"],
+    path=join(BASE_PATH_TRANSFORMED, TRANSACTIONS_TABLE, "agg-funding-rate-1h")
+)
+def agg_funding_rate_1h():
+    return (
+        dlt.read_stream("cleaned_transactions")
+        .withWatermark("block_time","1 hour")
+        .withColumn("instruction", F.explode("instructions"))
+        .withColumn("event", F.explode("instruction.events"))
+        .filter("event.name == 'apply_funding_event'")
+        .groupBy(
+            F.col("event.event.user").alias("pubkey"),
+            "event.event.margin_account",
+            F.date_trunc("hour", "block_time").alias("hour"), # change to timestamp later
+            "event.event.asset"
+        )
+        .agg(
+            (F.sum(F.col("event.event.balance_change") / PRICE_FACTOR)).alias("balance_change")
+        )
+        .filter("balance_change <> 0")
+    )
 
