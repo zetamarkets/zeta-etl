@@ -151,6 +151,28 @@ def cleaned_transactions():
         .withColumn("hour_", F.date_format("block_time", "HH").cast("int"))
     )
 
+# # Transactions + Geyser
+# @dlt.table(
+#     comment="Cleaned data for platform transactions",
+#     table_properties={
+#         "quality": "silver",
+#         "pipelines.autoOptimize.zOrderCols": "block_time",
+#     },
+#     partition_cols=["date_"],
+#     path=join(BASE_PATH_TRANSFORMED, TRANSACTIONS_TABLE, "cleaned-transactions"),
+# )
+# def cleaned_transactions_geyser_v2():
+# #     geyser_cleaned_txs = dlt.read("zetadex_mainnet.cleaned_transactions_geyser")
+#     return (
+#         dlt.read_stream("raw_transactions")
+#         .withWatermark("block_time", "1 hour")
+#         .filter("is_successful")
+#         .drop("year", "month", "day", "hour")
+#         .withColumn("date_", F.to_date("block_time"))
+#         .withColumn("hour_", F.date_format("block_time", "HH").cast("int"))
+#         .join(read("zetadex_mainnet.cleaned_transactions_geyser"), ["signature", "instructions", "is_successful", "slot", "block_time", "year", "month", "day", "hour"], "outer")
+#         .dropDuplicates(["signature"])
+#     )
 
 # Deposits
 @dlt.table(
@@ -281,6 +303,7 @@ def cleaned_ix_place_order():
             "instruction.args.order_type",
             "instruction.args.client_order_id",
             "instruction.args.tag",
+            "instruction.args.tif_offset",
             (F.col("event.event.fee") / PRICE_FACTOR).alias("trading_fee"),
             (F.col("event.event.oracle_price") / PRICE_FACTOR).alias("oracle_price"),
             "event.event.order_id",

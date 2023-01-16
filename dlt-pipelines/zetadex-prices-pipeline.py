@@ -14,12 +14,6 @@ import dlt
 
 # COMMAND ----------
 
-from datetime import datetime, timezone
-current_date = str(datetime.now(timezone.utc).date())
-current_hour = datetime.now(timezone.utc).hour
-
-# COMMAND ----------
-
 TRADES_TABLE = "trades"
 PRICES_TABLE = "prices"
 REWARDS_TABLE = "rewards"
@@ -463,10 +457,6 @@ def cleaned_trades_rewards_v():
     df = (
         dlt.read("cleaned_trades")
         .withColumn(
-            "epoch", F.date_trunc("week", F.expr("timestamp - interval 104 hours"))
-        )
-        .withColumn("epoch", F.expr("epoch + interval 104 hours"))
-        .withColumn(
             "market",
             F.when(
                 F.col("kind") == "perp",
@@ -496,17 +486,29 @@ def cleaned_trades_rewards_v():
         .withColumn(
             "maker_taker", F.when(F.col("is_maker"), "maker").otherwise("taker")
         )
-        .groupBy("epoch", "kind", "market", "user", "maker_taker")
-        .agg(
-            F.sum("notional").alias("volume"),
-            F.sum("approx_fees").alias("fees"),
-        )
+        .select("timestamp", "kind", "market", "user", "maker_taker", "notional", F.col("approx_fees").alias("fees"))
     )
     return df
 
 # COMMAND ----------
 
 # DBTITLE 1,Gold
+@dlt.view(comment="Trade data used for rewards aggregated by epoch")
+def agg_trades_rewards_epoch_user_market_v():
+    return (
+        dlt.read("cleaned_trades_rewards_v")
+        .withColumn(
+            "epoch", F.date_trunc("week", F.expr("timestamp - interval 104 hours"))
+        )
+        .withColumn("epoch", F.expr("epoch + interval 104 hours"))
+        .groupBy("epoch", "kind", "market", "user", "maker_taker")
+        .agg(
+            F.sum("notional").alias("volume"),
+            F.sum("fees").alias("fees"),
+        )
+    )
+
+
 @dlt.table(
     comment="Maker rewards by epoch-user-market",
     table_properties={"quality": "gold", "pipelines.autoOptimize.zOrderCols": "user"},
@@ -514,7 +516,9 @@ def cleaned_trades_rewards_v():
     path=join(BASE_PATH_TRANSFORMED, REWARDS_TABLE, "agg-maker-epoch-user-market"),
 )
 def agg_maker_rewards_epoch_user_market():
-    cleaned_trades_rewards_v = dlt.read("cleaned_trades_rewards_v")
+    agg_trades_rewards_epoch_user_market_v = dlt.read(
+        "agg_trades_rewards_epoch_user_market_v"
+    )
 
     w_market = Window.partitionBy("epoch", "market").orderBy(F.desc("volume"))
     w_user = Window.partitionBy("epoch", "user")
@@ -522,7 +526,7 @@ def agg_maker_rewards_epoch_user_market():
 
     labels = spark.table("zetadex_mainnet.pubkey_label")
     maker_rewards = (
-        cleaned_trades_rewards_v.filter("maker_taker == 'maker'")
+        agg_trades_rewards_epoch_user_market_v.filter("maker_taker == 'maker'")
         .filter(F.col("kind").isin(["perp", "future"]))  # todo options later
         .filter("epoch >= '2022-11-04'")
         .filter(
@@ -582,13 +586,15 @@ def agg_maker_rewards_epoch_user_market():
     path=join(BASE_PATH_TRANSFORMED, REWARDS_TABLE, "agg-taker-epoch-user-market"),
 )
 def agg_taker_rewards_epoch_user_market():
-    cleaned_trades_rewards_v = dlt.read("cleaned_trades_rewards_v")
+    agg_trades_rewards_epoch_user_market_v = dlt.read(
+        "agg_trades_rewards_epoch_user_market_v"
+    )
 
     w_user = Window.partitionBy("epoch", "user")
     w = Window.partitionBy("epoch")
 
     taker_rewards = (
-        cleaned_trades_rewards_v.filter("maker_taker == 'taker'")
+        agg_trades_rewards_epoch_user_market_v.filter("maker_taker == 'taker'")
         .filter(F.col("kind").isin(["perp", "future"]))  # todo options later
         .filter("epoch >= '2022-11-04'")
         .filter(
@@ -677,6 +683,58 @@ def agg_taker_rewards_epoch_user():
     )
     return df
 
+
+# Shitcoin of the week
+@dlt.table(
+    comment="Shitcoin rewards by hour-user",
+    table_properties={"quality": "gold", "pipelines.autoOptimize.zOrderCols": "user"},
+    # partition_cols=["epoch_hour"],
+    path=join(BASE_PATH_TRANSFORMED, REWARDS_TABLE, "agg-shitcoin-epoch-user"),
+)
+def agg_bonk_rewards_epoch_user():
+    prices_df = (
+        dlt.read("cleaned_coingecko_prices")
+        .withColumn("date_hour", F.date_trunc("hour", "timestamp"))
+        .withWatermark("date_hour", "1 hour")
+    )
+
+    w_cumsum = (
+        Window.partitionBy("user")
+        .orderBy("epoch_hour")
+        .rangeBetween(Window.unboundedPreceding, 0)
+    )
+
+    df = (
+        dlt.read("cleaned_trades_rewards_v")
+        .filter("timestamp >= '2023-01-05'")
+        .filter("maker_taker == 'taker'")
+        .filter(F.col("kind").isin(["perp", "future"]))
+        .withColumn("epoch_hour", F.date_trunc("hour", "timestamp"))
+        .withColumn("reward_currency", F.lit("BONK"))
+        .groupBy("epoch_hour", "user", "reward_currency")
+        .agg(F.sum("notional").alias("taker_volume"), F.sum("fees").alias("taker_fees"))
+        .alias("t")
+        .join(
+            prices_df.alias("cg"),
+            F.expr(
+                """
+                reward_currency = cg.underlying AND
+                t.epoch_hour = cg.date_hour
+                """
+            ),
+            how="left",
+        )
+        .select("t.*", "cg.price_usd")
+        .withColumn("bonk_bonus", F.least(F.col("taker_fees"),F.lit(10)) / F.col("price_usd")) # cap to 10 USDC per hour
+        .select(
+            "*",
+            F.sum("taker_volume").over(w_cumsum).alias("taker_volume_cumsum"),
+            F.sum("taker_fees").over(w_cumsum).alias("taker_fees_cumsum"),
+            F.sum("bonk_bonus").over(w_cumsum).alias("bonk_bonus_cumsum"),
+        )
+    )
+    return df
+
 # COMMAND ----------
 
 # MAGIC %md
@@ -685,7 +743,37 @@ def agg_taker_rewards_epoch_user():
 # COMMAND ----------
 
 # DBTITLE 1,Gold
-# TODO: sort out options referral fees (since not 5bps)
+@dlt.view
+def agg_trades_rewards_epoch_referee_referrer_v():
+    cleaned_trades_rewards_v = dlt.read("cleaned_trades_rewards_v")
+    referrals = spark.table("zetadex_mainnet.cleaned_referrals")
+
+    return (
+        referrals.withColumnRenamed("timestamp", "referral_timestamp")
+        .withColumnRenamed("referral", "referee")
+        .alias("r1")
+        .join(
+            cleaned_trades_rewards_v.alias("t").filter("timestamp >= '2022-09-02T08'"),
+            F.expr(
+                """
+                t.user == r1.referee
+                and t.timestamp >= r1.referral_timestamp
+            """
+            ),
+            how="inner",
+        )
+        .withColumn(
+            "epoch", F.date_trunc("week", F.expr("timestamp - interval 104 hours"))
+        )
+        .withColumn("epoch", F.expr("epoch + interval 104 hours"))
+        .groupBy("epoch", "referee", "referrer", "alias")
+        .agg(
+            F.sum("notional").alias("volume"),
+            F.sum("fees").alias("fees"),
+        )
+    )
+
+
 @dlt.table(
     comment="Referrer rewards by epoch-user",
     table_properties={
@@ -696,33 +784,27 @@ def agg_taker_rewards_epoch_user():
     path=join(BASE_PATH_TRANSFORMED, REWARDS_TABLE, "agg-referrer-epoch-user"),
 )
 def agg_referrer_rewards_epoch_user():
-    cleaned_trades_rewards_v = dlt.read("cleaned_trades_rewards_v")
+    agg_trades_rewards_epoch_referee_referrer_v = dlt.read(
+        "agg_trades_rewards_epoch_referee_referrer_v"
+    )
     referrals = spark.table("zetadex_mainnet.cleaned_referrals")
 
     days = lambda i: i * 86400
-    w_referrer_30d = (
-        Window.partitionBy("referrer")
+    w_referee_referrer_30d = (
+        Window.partitionBy("referee", "referrer")
         .orderBy(F.unix_timestamp("epoch"))
-        .rangeBetween(-days(30), 0) # last 30 days
+        .rangeBetween(-days(30), 0)  # last 30 days
     )
     w_cumsum = (
         Window.partitionBy("referrer")
         .orderBy("epoch")
-        .rowsBetween(Window.unboundedPreceding, Window.currentRow) # cumulative
+        .rowsBetween(Window.unboundedPreceding, Window.currentRow)  # cumulative
     )
+
     referrer_rewards = (
-        cleaned_trades_rewards_v.filter("epoch >= '2022-09-01'")
-        #  .filter(F.col("kind").isin(["perp", "future"]))  # todo options later
-        .join(
-            referrals.alias("r1"),
-            [
-                cleaned_trades_rewards_v.user == referrals.referral,
-                cleaned_trades_rewards_v.epoch >= referrals.timestamp,
-            ],
-            how="inner",
+        agg_trades_rewards_epoch_referee_referrer_v.alias("r1").withColumn(
+            "referral_volume_30d", F.sum("volume").over(w_referee_referrer_30d)
         )
-        .withColumnRenamed("timestamp", "referral_timestamp")
-        .withColumn("referral_volume_30d", F.sum("volume").over(w_referrer_30d))
         .groupBy("epoch", "referrer", "alias")
         .agg(
             F.sum("volume").alias("referral_volume"),
@@ -776,12 +858,8 @@ def agg_referrer_rewards_epoch_user():
         .withColumn(
             "referrer_fee_rebate_cumsum", F.sum("referrer_fee_rebate").over(w_cumsum)
         )
-        .withColumn(
-            "referral_fees_cumsum", F.sum("referral_fees").over(w_cumsum)
-        )
-        .withColumn(
-            "referral_volume_cumsum", F.sum("referral_volume").over(w_cumsum)
-        )
+        .withColumn("referral_fees_cumsum", F.sum("referral_fees").over(w_cumsum))
+        .withColumn("referral_volume_cumsum", F.sum("referral_volume").over(w_cumsum))
     )
     return referrer_rewards
 
@@ -796,28 +874,21 @@ def agg_referrer_rewards_epoch_user():
     path=join(BASE_PATH_TRANSFORMED, REWARDS_TABLE, "agg-referee-epoch-user"),
 )
 def agg_referee_rewards_epoch_user():
-    cleaned_trades_rewards_v = dlt.read("cleaned_trades_rewards_v")
-    referrals = spark.table("zetadex_mainnet.cleaned_referrals")
+    agg_trades_rewards_epoch_referee_referrer_v = dlt.read(
+        "agg_trades_rewards_epoch_referee_referrer_v"
+    )
     referrer_rewards = dlt.read("agg_referrer_rewards_epoch_user")
+
     w_cumsum = (
         Window.partitionBy("referee")
         .orderBy("epoch")
-        .rowsBetween(Window.unboundedPreceding, Window.currentRow) # cumulative
+        .rowsBetween(Window.unboundedPreceding, Window.currentRow)  # cumulative
     )
+
     referee_rewards = (
-        cleaned_trades_rewards_v.filter("epoch >= '2022-09-01'")
-        .join(
-            referrals,
-            [
-                cleaned_trades_rewards_v.user == referrals.referral,
-                cleaned_trades_rewards_v.epoch >= referrals.timestamp,
-            ],
-            how="inner",
+        agg_trades_rewards_epoch_referee_referrer_v.withColumnRenamed(
+            "alias", "referrer_alias"
         )
-        .withColumnRenamed("alias", "referrer_alias")
-        .withColumnRenamed("referral", "referee")
-        .groupBy("epoch", "referee", "referrer", "referrer_alias")
-        .agg(F.sum("volume").alias("volume"), F.sum("fees").alias("fees"))
         .join(referrer_rewards, on=["epoch", "referrer"], how="left")
         .withColumn(
             "referee_fee_rebate",
@@ -834,10 +905,16 @@ def agg_referee_rewards_epoch_user():
             "volume",
             "fees",
             "referee_fee_rebate",
-            F.sum("referee_fee_rebate").over(w_cumsum).alias("referee_fee_rebate_cumsum"),
+            F.sum("referee_fee_rebate")
+            .over(w_cumsum)
+            .alias("referee_fee_rebate_cumsum"),
             F.sum("fees").over(w_cumsum).alias("fees_cumsum"),
-            F.sum("volume").over(w_cumsum).alias("volume_cumsum")
+            F.sum("volume").over(w_cumsum).alias("volume_cumsum"),
         )
         .orderBy("epoch", "referee")
     )
     return referee_rewards
+
+# COMMAND ----------
+
+

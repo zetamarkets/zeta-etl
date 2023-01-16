@@ -24,6 +24,7 @@ PRICE_FACTOR = 1e6
 SIZE_FACTOR = 1e3
 
 TRANSACTIONS_TABLE = "transactions-geyser"
+MARKETS_TABLE = "markets"
 SLOTS_TABLE = "slots-geyser"
 PNL_TABLE = "pnl-geyser"
 
@@ -38,6 +39,65 @@ S3_BUCKET_LANDED = f"zetadex-{NETWORK}-landing"
 BASE_PATH_LANDED = join("/mnt", S3_BUCKET_LANDED)
 S3_BUCKET_TRANSFORMED = f"zetadex-{NETWORK}"
 BASE_PATH_TRANSFORMED = join("/mnt", S3_BUCKET_TRANSFORMED)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Markets
+
+# COMMAND ----------
+
+markets_schema = """
+underlying string,
+active_timestamp timestamp,
+expiry_timestamp timestamp, 
+strike double, 
+kind string, 
+perp_sync_queue_head int,
+perp_sync_queue_length int,
+market_pub_key string, 
+timestamp timestamp, 
+slot bigint
+"""
+
+@dlt.table(
+    comment="Raw metadata for Zeta's Serum markets",
+    table_properties={
+        "quality":"bronze", 
+    },
+    path=join(BASE_PATH_TRANSFORMED,MARKETS_TABLE,"raw"),
+    schema=markets_schema
+)
+def raw_markets():
+    return (spark
+           .readStream
+           .format("cloudFiles")
+           .option("cloudFiles.format", "json")
+           .option("cloudFiles.region", "ap-southeast-1")
+           .option("cloudFiles.includeExistingFiles", True)
+           .option("cloudFiles.useNotifications", True)
+           .option("partitionColumns", "year,month,day,hour")
+           .schema(markets_schema)
+           .load(join(BASE_PATH_LANDED,MARKETS_TABLE,"data"))
+          )
+
+# COMMAND ----------
+
+@dlt.table(
+    comment="Cleaned metadata for Zeta's Serum markets",
+    table_properties={
+        "quality":"silver", 
+        "pipelines.autoOptimize.zOrderCols":"timestamp"
+    },
+    partition_cols=["underlying"],
+    path=join(BASE_PATH_TRANSFORMED,MARKETS_TABLE,"cleaned")
+)
+def cleaned_markets():
+    return (dlt.read_stream("raw_markets")
+           .withWatermark("timestamp", "1 hour")
+           .dropDuplicates(["underlying","active_timestamp","expiry_timestamp","strike","kind","market_pub_key"])
+           .drop("timestamp","slot")
+          )
 
 # COMMAND ----------
 
@@ -184,7 +244,8 @@ def zetagroup_mapping_v():
 
 @dlt.view
 def cleaned_markets_v():
-    return spark.table(f"zetadex_{NETWORK}.cleaned_markets")
+    # return spark.table(f"zetadex_{NETWORK}.cleaned_markets")
+    return dlt.read("cleaned_markets")
 
 # Transactions
 @dlt.table(
@@ -308,6 +369,7 @@ def cleaned_ix_place_order_geyser():
                    "instruction.args.order_type",
                    "instruction.args.client_order_id",
                    "instruction.args.tag",
+                   "instruction.args.tif_offset",
                    (F.col("event.event.fee") / PRICE_FACTOR).alias("trading_fee"),
                    (F.col("event.event.oracle_price") / PRICE_FACTOR).alias("oracle_price"),
                    "event.event.order_id",
@@ -605,13 +667,13 @@ def agg_funding_rate_1h():
 def agg_ix_deposit_u1h_geyser():
     return (dlt.read_stream("cleaned_ix_deposit_geyser")
                  .withWatermark("block_time", "1 hour")
-                 .groupBy(F.window("block_time", "1 hour").alias("timestamp_window"), F.col("accounts.authority").alias("authority"), "underlying")
+                 .groupBy(F.window("block_time", "1 hour").alias("timestamp_window"), F.col("accounts.authority").alias("owner_pub_key"), "underlying")
                  .agg(
                      F.count("*").alias("deposit_count"),
                      F.sum("deposit_amount").alias("deposit_amount")
                   )
-                 .withColumn("date_", F.to_date(F.col("timestamp_window.start")))
-                 .withColumn("hour_", F.date_format(F.col("timestamp_window.start"), "HH").cast("int"))
+                 .withColumn("date_", F.to_date(F.col("timestamp_window.end") - F.expr('INTERVAL 1 HOUR')))
+                 .withColumn("hour_", F.date_format(F.col("timestamp_window.end") - F.expr('INTERVAL 1 HOUR'), "HH").cast("int"))
             )
     
 @dlt.table(
@@ -626,128 +688,232 @@ def agg_ix_deposit_u1h_geyser():
 def agg_ix_withdraw_u1h_geyser():
     return (dlt.read_stream("cleaned_ix_withdraw_geyser")
                  .withWatermark("block_time", "1 hour")
-                 .groupBy(F.window("block_time", "1 hour").alias("timestamp_window"), F.col("accounts.authority").alias("authority"), "underlying")
+                 .groupBy(F.window("block_time", "1 hour").alias("timestamp_window"), F.col("accounts.authority").alias("owner_pub_key"), "underlying")
                  .agg(
                      F.count("*").alias("withdraw_count"),
                      F.sum("withdraw_amount").alias("withdraw_amount")
                   )
-                 .withColumn("date_", F.to_date(F.col("timestamp_window.start")))
-                 .withColumn("hour_", F.date_format(F.col("timestamp_window.start"), "HH").cast("int"))
+                 .withColumn("date_", F.to_date(F.col("timestamp_window.end") - F.expr('INTERVAL 1 HOUR')))
+                 .withColumn("hour_", F.date_format(F.col("timestamp_window.end") - F.expr('INTERVAL 1 HOUR'), "HH").cast("int"))
             )
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## PnL
+
+# COMMAND ----------
+
+pnl_schema = """
+timestamp timestamp,
+underlying string,
+owner_pub_key string,
+balance double,
+unrealized_pnl double,
+year string,
+month string,
+day string,
+hour string
+"""
+
+@dlt.table(
+    comment="Raw data for margin account profit and loss",
+    table_properties={
+        "quality":"bronze", 
+    },
+    path=join(BASE_PATH_TRANSFORMED,"pnl","raw"),
+    schema=pnl_schema
+)
+def raw_pnl():
+    return (spark
+           .readStream
+           .format("cloudFiles")
+           .option("cloudFiles.format", "json")
+           .option("cloudFiles.region", "ap-southeast-1")
+           .option("cloudFiles.includeExistingFiles", True)
+           .option("cloudFiles.useNotifications", True)
+           .option("partitionColumns", "year,month,day,hour")
+           .option("mergeSchema", "true")
+           .schema(pnl_schema)
+           .load(join(BASE_PATH_LANDED,"margin-accounts-pnl","data"))
+          )
 
 # COMMAND ----------
 
 @dlt.table(
     comment="Cleaned data for margin account profit and loss",
     table_properties={
-        "quality":"silver", 
-        "pipelines.autoOptimize.zOrderCols":"authority"
+        "quality": "silver",
+        "pipelines.autoOptimize.zOrderCols": "owner_pub_key",
     },
     partition_cols=["date_"],
-    path=join(BASE_PATH_TRANSFORMED,PNL_TABLE,"cleaned")
+    path=join(BASE_PATH_TRANSFORMED, PNL_TABLE, "cleaned"),
 )
 def cleaned_pnl_geyser():
-    deposits_df = (dlt.read("agg_ix_deposit_u1h_geyser")
-#                  .withColumn("date_hour", F.date_trunc("hour", F.col("timestamp_window.start")))
-#                  .withWatermark("date_hour", "1 hour")
-                 .drop("date_","hour_")
-                )
-    withdrawals_df = (dlt.read("agg_ix_withdraw_u1h_geyser")
-#                  .withColumn("date_hour", F.date_trunc("hour", F.col("timestamp_window.start")))
-#                  .withWatermark("date_hour", "1 hour")
-                 .drop("date_","hour_")
-                )
-    return (spark.table("zetadex_mainnet.raw_pnl") # ideally would be read_stream (TODO)
-           .withWatermark("timestamp", "1 hour")
-           .dropDuplicates(["owner_pub_key","underlying","year","month","day","hour"])
-           .join(deposits_df.alias("d"),
-              F.expr("""
+    deposits_df = (
+        dlt.read("agg_ix_deposit_u1h_geyser")
+        #                  .withColumn("date_hour", F.date_trunc("hour", F.col("timestamp_window.start")))
+        #                  .withWatermark("date_hour", "1 hour")
+        .drop("date_", "hour_")
+    )
+    withdrawals_df = (
+        dlt.read("agg_ix_withdraw_u1h_geyser")
+        #                  .withColumn("date_hour", F.date_trunc("hour", F.col("timestamp_window.start")))
+        #                  .withWatermark("date_hour", "1 hour")
+        .drop("date_", "hour_")
+    )
+    return (
+        dlt.read("raw_pnl")  # ideally would be read_stream (TODO)
+        .withWatermark("timestamp", "1 hour")
+        .dropDuplicates(["owner_pub_key", "underlying", "year", "month", "day", "hour"])
+        .join(
+            deposits_df.alias("d"),
+            F.expr(
+                """
                raw_pnl.underlying = d.underlying AND
-               raw_pnl.owner_pub_key = d.authority AND
+               raw_pnl.owner_pub_key = d.owner_pub_key AND
                raw_pnl.timestamp >= d.timestamp_window.start + interval '1' hour AND raw_pnl.timestamp < d.timestamp_window.end + interval '1' hour
-               """),
-              how="left")
-           .join(withdrawals_df.alias("w"),
-              F.expr("""
+               """
+            ),
+            how="left",
+        )
+        .join(
+            withdrawals_df.alias("w"),
+            F.expr(
+                """
                raw_pnl.underlying = w.underlying AND
-               raw_pnl.owner_pub_key = w.authority AND
+               raw_pnl.owner_pub_key = w.owner_pub_key AND
                raw_pnl.timestamp >= w.timestamp_window.start + interval '1' hour AND raw_pnl.timestamp < w.timestamp_window.end + interval '1' hour
-               """),
-              how="left")
-           .withColumn("deposit_amount", F.coalesce("deposit_amount",F.lit(0)))
-           .withColumn("withdraw_amount", F.coalesce("withdraw_amount",F.lit(0)))
-           .withColumn("deposit_amount_cumsum", F.sum("deposit_amount").over(Window.partitionBy("raw_pnl.underlying","raw_pnl.owner_pub_key").orderBy("raw_pnl.timestamp").rowsBetween(Window.unboundedPreceding, Window.currentRow)))
-           .withColumn("withdraw_amount_cumsum", F.sum("withdraw_amount").over(Window.partitionBy("raw_pnl.underlying","raw_pnl.owner_pub_key").orderBy("raw_pnl.timestamp").rowsBetween(Window.unboundedPreceding, Window.currentRow)))
-           .withColumn("pnl", F.col("balance") + F.col("unrealized_pnl") - (F.col("deposit_amount_cumsum") - F.col("withdraw_amount_cumsum")))
-           .withColumn("date_", F.to_date("timestamp"))
-           .withColumn("hour_", F.date_format("timestamp", "HH").cast("int"))
-           .select(
-               "raw_pnl.timestamp",
-               "raw_pnl.underlying",
-               F.col("raw_pnl.owner_pub_key").alias("authority"),
-               "balance",
-               "unrealized_pnl",
-               "pnl",
-               "deposit_amount",
-               "withdraw_amount",
-               "deposit_amount_cumsum",
-               "withdraw_amount_cumsum",
-               "date_",
-               "hour_"
-           )
-          )
+               """
+            ),
+            how="left",
+        )
+        .withColumnRenamed("timestamp", "indexed_timestamp")
+        .withColumn("timestamp", F.date_trunc("hour", "indexed_timestamp"))
+        .withColumn("deposit_amount", F.coalesce("deposit_amount", F.lit(0)))
+        .withColumn("withdraw_amount", F.coalesce("withdraw_amount", F.lit(0)))
+        .withColumn(
+            "deposit_amount_cumsum",
+            F.sum("deposit_amount").over(
+                Window.partitionBy("raw_pnl.underlying", "raw_pnl.owner_pub_key")
+                .orderBy("timestamp")
+                .rowsBetween(Window.unboundedPreceding, Window.currentRow)
+            ),
+        )
+        .withColumn(
+            "withdraw_amount_cumsum",
+            F.sum("withdraw_amount").over(
+                Window.partitionBy("raw_pnl.underlying", "raw_pnl.owner_pub_key")
+                .orderBy("timestamp")
+                .rowsBetween(Window.unboundedPreceding, Window.currentRow)
+            ),
+        )
+        .withColumn(
+            "pnl",
+            F.col("balance")
+            + F.col("unrealized_pnl")
+            - (F.col("deposit_amount_cumsum") - F.col("withdraw_amount_cumsum")),
+        )
+        .withColumn("date_", F.to_date("timestamp"))
+        .withColumn("hour_", F.date_format("timestamp", "HH").cast("int"))
+        .select(
+            "timestamp",
+            "raw_pnl.underlying",
+            "raw_pnl.owner_pub_key",
+            "balance",
+            "unrealized_pnl",
+            "pnl",
+            "deposit_amount",
+            "withdraw_amount",
+            "deposit_amount_cumsum",
+            "withdraw_amount_cumsum",
+            "date_",
+            "hour_",
+        )
+    )
 
 # COMMAND ----------
 
-windowSpec = Window.partitionBy("authority").orderBy("timestamp")
-windowSpec24h = Window.partitionBy("authority").orderBy("timestamp").rowsBetween(-24, Window.currentRow)
-windowSpec7d = Window.partitionBy("authority").orderBy("timestamp").rowsBetween(-24*7, Window.currentRow)
-windowSpec30d = Window.partitionBy("authority").orderBy("timestamp").rowsBetween(-24*7*30, Window.currentRow)
+days = lambda i: i * 86400
 
-windowSpecRatioRank24h = Window.partitionBy("date_","hour_").orderBy(F.desc("pnl_ratio_24h"),F.desc("pnl_diff_24h"), "authority")
-windowSpecRatioRank7d = Window.partitionBy("date_","hour_").orderBy(F.desc("pnl_ratio_7d"),F.desc("pnl_diff_7d"), "authority")
-windowSpecRatioRank30d = Window.partitionBy("date_","hour_").orderBy(F.desc("pnl_ratio_30d"),F.desc("pnl_diff_30d"), "authority")
-windowSpecDiffRank24h = Window.partitionBy("date_","hour_").orderBy(F.desc("pnl_diff_24h"),F.desc("pnl_ratio_24h"), "authority")
-windowSpecDiffRank7d = Window.partitionBy("date_","hour_").orderBy(F.desc("pnl_diff_7d"),F.desc("pnl_ratio_7d"), "authority")
-windowSpecDiffRank30d = Window.partitionBy("date_","hour_").orderBy(F.desc("pnl_diff_30d"),F.desc("pnl_ratio_30d"), "authority")
+windowSpec24h = (
+    Window.partitionBy("owner_pub_key")
+    .orderBy(F.unix_timestamp("timestamp"))
+    .rangeBetween(-days(1), 0)
+)
+windowSpec7d = (
+    Window.partitionBy("owner_pub_key")
+    .orderBy(F.unix_timestamp("timestamp"))
+    .rangeBetween(-days(7), 0)
+)
+windowSpec30d = (
+    Window.partitionBy("owner_pub_key")
+    .orderBy(F.unix_timestamp("timestamp"))
+    .rangeBetween(-days(30), 0)
+)
+
+windowSpecRatioRank24h = Window.partitionBy("date_", "hour_").orderBy(
+    F.desc("pnl_ratio_24h"), F.desc("pnl_diff_24h"), "owner_pub_key"
+)
+windowSpecRatioRank7d = Window.partitionBy("date_", "hour_").orderBy(
+    F.desc("pnl_ratio_7d"), F.desc("pnl_diff_7d"), "owner_pub_key"
+)
+windowSpecRatioRank30d = Window.partitionBy("date_", "hour_").orderBy(
+    F.desc("pnl_ratio_30d"), F.desc("pnl_diff_30d"), "owner_pub_key"
+)
+windowSpecDiffRank24h = Window.partitionBy("date_", "hour_").orderBy(
+    F.desc("pnl_diff_24h"), F.desc("pnl_ratio_24h"), "owner_pub_key"
+)
+windowSpecDiffRank7d = Window.partitionBy("date_", "hour_").orderBy(
+    F.desc("pnl_diff_7d"), F.desc("pnl_ratio_7d"), "owner_pub_key"
+)
+windowSpecDiffRank30d = Window.partitionBy("date_", "hour_").orderBy(
+    F.desc("pnl_diff_30d"), F.desc("pnl_ratio_30d"), "owner_pub_key"
+)
 
 # Break ties in PnL ranking by pubkey alphabetically
 @dlt.table(
     comment="User (24h, 7d, 30h) aggregated data for margin account profit and loss",
     table_properties={
-        "quality":"gold", 
-        "pipelines.autoOptimize.zOrderCols":"authority"
+        "quality": "gold",
+        "pipelines.autoOptimize.zOrderCols": "owner_pub_key",
     },
     partition_cols=["date_"],
-    path=join(BASE_PATH_TRANSFORMED,PNL_TABLE,"agg")
+    path=join(BASE_PATH_TRANSFORMED, PNL_TABLE, "agg"),
 )
 def agg_pnl_geyser():
-    return (dlt.read("cleaned_pnl_geyser")
-            .withWatermark("timestamp", "1 hour")
-            .groupBy("timestamp","date_","hour_","authority")
-            .agg(
-                F.sum("pnl").alias("pnl"),
-                F.sum("deposit_amount").alias("deposit_amount"),
-                F.sum("withdraw_amount").alias("withdraw_amount"),
-                F.sum("balance").alias("balance"),
-                )
-            .withColumn("pnl_lag_24h",F.lag("pnl",24).over(windowSpec))
-            .withColumn("pnl_lag_7d",F.lag("pnl",24*7).over(windowSpec))
-            .withColumn("pnl_lag_30d",F.lag("pnl",24*7*30).over(windowSpec))
-            .withColumn("balance_lag_24h",F.lag("balance",24).over(windowSpec))
-            .withColumn("balance_lag_7d",F.lag("balance",24*7).over(windowSpec))
-            .withColumn("balance_lag_30d",F.lag("balance",24*7*30).over(windowSpec))
-            .withColumn("pnl_diff_24h",F.col("pnl")-F.col("pnl_lag_24h")-(F.sum("deposit_amount").over(windowSpec24h)-F.sum("withdraw_amount").over(windowSpec24h)))
-            .withColumn("pnl_diff_7d",F.col("pnl")-F.col("pnl_lag_7d")-(F.sum("deposit_amount").over(windowSpec7d)-F.sum("withdraw_amount").over(windowSpec7d)))
-            .withColumn("pnl_diff_30d",F.col("pnl")-F.col("pnl_lag_30d")-(F.sum("deposit_amount").over(windowSpec30d)-F.sum("withdraw_amount").over(windowSpec30d)))
-            .withColumn("pnl_ratio_24h",F.col("pnl_diff_24h")/F.col("balance_lag_24h"))
-            .withColumn("pnl_ratio_7d",F.col("pnl_diff_7d")/F.col("balance_lag_7d"))
-            .withColumn("pnl_ratio_30d",F.col("pnl_diff_30d")/F.col("balance_lag_30d"))
-            .withColumn("pnl_ratio_24h_rank", F.rank().over(windowSpecRatioRank24h))
-            .withColumn("pnl_ratio_7d_rank", F.rank().over(windowSpecRatioRank7d))
-            .withColumn("pnl_ratio_30d_rank", F.rank().over(windowSpecRatioRank30d))
-            .withColumn("pnl_diff_24h_rank", F.rank().over(windowSpecDiffRank24h))
-            .withColumn("pnl_diff_7d_rank", F.rank().over(windowSpecDiffRank7d))
-            .withColumn("pnl_diff_30d_rank", F.rank().over(windowSpecDiffRank30d))
-            .filter(f"date_ = '{current_date}' and hour_ = {current_hour}")
-            )
+    return (
+        dlt.read("cleaned_pnl_geyser")
+        .withWatermark("timestamp", "1 hour")
+        .groupBy("timestamp", "date_", "hour_", "owner_pub_key")
+        .agg(
+            F.sum("pnl").alias("pnl"),
+            F.sum("balance").alias("balance"),
+            # (F.sum("deposit_amount_cumsum") - F.sum("withdraw_amount_cumsum")).alias("net_inflow"),
+            # F.sum("deposit_amount_cumsum").alias("deposit_amount_cumsum"),
+            # F.sum("withdraw_amount_cumsum").alias("withdraw_amount_cumsum"),
+        )
+        .withColumn("pnl_lag_24h", F.first("pnl").over(windowSpec24h))
+        .withColumn("pnl_lag_7d", F.first("pnl").over(windowSpec7d))
+        .withColumn("pnl_lag_30d", F.first("pnl").over(windowSpec30d))
+        .withColumn("balance_lag_24h", F.first("balance").over(windowSpec24h))
+        .withColumn("balance_lag_7d", F.first("balance").over(windowSpec7d))
+        .withColumn("balance_lag_30d", F.first("balance").over(windowSpec30d))
+        .withColumn("pnl_diff_24h", F.col("pnl") - F.col("pnl_lag_24h"))
+        .withColumn("pnl_diff_7d", F.col("pnl") - F.col("pnl_lag_7d"))
+        .withColumn("pnl_diff_30d", F.col("pnl") - F.col("pnl_lag_30d"))
+        .withColumn("pnl_ratio_24h", F.col("pnl_diff_24h") / F.col("balance_lag_24h"))
+        .withColumn("pnl_ratio_7d", F.col("pnl_diff_7d") / F.col("balance_lag_7d"))
+        .withColumn("pnl_ratio_30d", F.col("pnl_diff_30d") / F.col("balance_lag_30d"))
+        .withColumn("pnl_ratio_24h_rank", F.rank().over(windowSpecRatioRank24h))
+        .withColumn("pnl_ratio_7d_rank", F.rank().over(windowSpecRatioRank7d))
+        .withColumn("pnl_ratio_30d_rank", F.rank().over(windowSpecRatioRank30d))
+        .withColumn("pnl_diff_24h_rank", F.rank().over(windowSpecDiffRank24h))
+        .withColumn("pnl_diff_7d_rank", F.rank().over(windowSpecDiffRank7d))
+        .withColumn("pnl_diff_30d_rank", F.rank().over(windowSpecDiffRank30d))
+        .filter(f"date_ = '{current_date}' and hour_ = {current_hour}")
+    )
+
+# COMMAND ----------
+
+

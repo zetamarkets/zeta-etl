@@ -32,6 +32,8 @@ from datetime import datetime, timezone
 
 current_date = str(datetime.now(timezone.utc).date())
 current_hour = datetime.now(timezone.utc).hour
+print(current_date)
+print(current_hour)
 
 # COMMAND ----------
 
@@ -97,15 +99,21 @@ fs.publish_table(
 
 # DBTITLE 1,zetadex_mainnet.agg_pnl
 # fs.register_table(
-#   delta_table="zetadex_mainnet.agg_pnl",
+#   delta_table="zetadex_mainnet.agg_pnl_geyser",
 #   primary_keys='owner_pub_key',
 #   description='Zeta DEX Account PNLs'
 # )
 
+max_date_row = (spark.table('zetadex_mainnet.agg_pnl_geyser').agg({"date_": "max"}).collect())[0]
+print(max_date_row["max(date_)"])
+max_hour_row = (spark.table("zetadex_mainnet.agg_pnl_geyser").filter(F.col("date_") == max_date_row["max(date_)"]).agg({"hour_": "max"}).collect())[0]
+print(max_hour_row["max(hour_)"])
+# max_hour = (spark.table('zetadex_mainnet.agg_pnl_geyser').agg({"date_": "max"}).collect())[0]
+
 fs.publish_table(
-  name='zetadex_mainnet.agg_pnl',
+  name='zetadex_mainnet.agg_pnl_geyser',
   online_store=online_store,
-  filter_condition=f"date_ = '{current_date}' and hour_ = '{current_hour}'",
+  filter_condition=f"date_ = '{max_date_row['max(date_)']}' and hour_ = '{max_hour_row['max(hour_)']}'",
   features=[
     'timestamp',
     'owner_pub_key',
