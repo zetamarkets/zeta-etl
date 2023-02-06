@@ -702,3 +702,46 @@ for item in tables:
         mode='merge'
     )
 
+
+# COMMAND ----------
+
+# DBTITLE 1,Flex TVL (zetadex_feature_store.zetaflex_cleaned_tvl)
+table_name = "zetadex_feature_store.zetaflex_cleaned_tvl"
+
+row1 = (spark.table("zetaflex_mainnet.cleaned_tvl").agg({"timestamp": "max"}).collect())[0]
+
+print(row1["max(timestamp)"])
+
+flex_tvl_df = \
+(spark.table("zetaflex_mainnet.cleaned_tvl").filter(F.col("timestamp") == row1["max(timestamp)"]).withColumn("ddb_key", F.lit("flex_tvl")))
+
+flex_tvl_df.show()
+
+try:
+    result = fs.get_table(table_name)
+    print('Table Already Exists...')
+except Exception:
+    print('Creating New Table...')
+    fs.create_table(
+        name=table_name,
+        primary_keys="ddb_key",
+        df=flex_tvl_df,
+        description="Zetaflex Current TVL",
+    )
+
+# Write new results to table
+fs.write_table(
+  name=table_name,
+  df=flex_tvl_df,
+  mode="merge",
+)
+
+fs.publish_table(
+  name=table_name,
+  online_store=online_store,
+  mode='merge'
+)
+
+# COMMAND ----------
+
+

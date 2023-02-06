@@ -771,6 +771,7 @@ def agg_trades_rewards_epoch_referee_referrer_v():
             F.sum("notional").alias("volume"),
             F.sum("fees").alias("fees"),
         )
+        .filter("referee != 'dieg32oMKahzEfSy1ct6QYQxvrjuiTPcHLH5mv5od9B'") # filter out internal accounts
     )
 
 

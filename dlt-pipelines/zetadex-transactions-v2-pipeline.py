@@ -151,28 +151,6 @@ def cleaned_transactions():
         .withColumn("hour_", F.date_format("block_time", "HH").cast("int"))
     )
 
-# # Transactions + Geyser
-# @dlt.table(
-#     comment="Cleaned data for platform transactions",
-#     table_properties={
-#         "quality": "silver",
-#         "pipelines.autoOptimize.zOrderCols": "block_time",
-#     },
-#     partition_cols=["date_"],
-#     path=join(BASE_PATH_TRANSFORMED, TRANSACTIONS_TABLE, "cleaned-transactions"),
-# )
-# def cleaned_transactions_geyser_v2():
-# #     geyser_cleaned_txs = dlt.read("zetadex_mainnet.cleaned_transactions_geyser")
-#     return (
-#         dlt.read_stream("raw_transactions")
-#         .withWatermark("block_time", "1 hour")
-#         .filter("is_successful")
-#         .drop("year", "month", "day", "hour")
-#         .withColumn("date_", F.to_date("block_time"))
-#         .withColumn("hour_", F.date_format("block_time", "HH").cast("int"))
-#         .join(read("zetadex_mainnet.cleaned_transactions_geyser"), ["signature", "instructions", "is_successful", "slot", "block_time", "year", "month", "day", "hour"], "outer")
-#         .dropDuplicates(["signature"])
-#     )
 
 # Deposits
 @dlt.table(
@@ -336,7 +314,9 @@ def cleaned_ix_order_complete():
         )
         .filter(
             (F.col("instruction.name") == "crank_event_queue")  # maker fill
-            | F.col("instruction.name").rlike("^place_(perp_)?order(_v[0-9]+)?$")  # taker fill
+            | F.col("instruction.name").rlike(
+                "^place_(perp_)?order(_v[0-9]+)?$"
+            )  # taker fill
             | F.col("instruction.name").contains("cancel")  # cancel
         )
         .withColumn("event", F.explode("instruction.events"))
@@ -353,7 +333,6 @@ def cleaned_ix_order_complete():
             "signature",
             "instruction_index",
             "underlying",
-            #                    F.upper("event.event.asset").alias("underlying"),
             F.col("expiry_timestamp").alias("expiry"),
             "strike",
             "kind",
@@ -419,9 +398,7 @@ def cleaned_ix_liquidate():
             (F.col("event.event.cost_of_trades") / PRICE_FACTOR).alias(
                 "cost_of_trades"
             ),
-            (F.col("event.event.size") / SIZE_FACTOR).alias(
-                "liquidated_size"
-            ),  # duplicate of the args?
+            (F.col("event.event.size") / SIZE_FACTOR).alias("liquidated_size"),
             (F.col("event.event.remaining_liquidatee_balance") / PRICE_FACTOR).alias(
                 "remaining_liquidatee_balance"
             ),
@@ -514,10 +491,10 @@ def cleaned_ix_trade():
             .otherwise("ask")
             .alias("side"),
             F.when(
-                F.col("instruction.name").rlike("^place_(perp_)?order(_v[0-9]+)?$"), "taker"
-            ).otherwise("maker")
-            # F.when(F.coalesce(F.col("event.event.isTaker"), F.lit("False")).cast("boolean"), "taker")
-            #                 .otherwise("maker")
+                F.col("instruction.name").rlike("^place_(perp_)?order(_v[0-9]+)?$"),
+                "taker",
+            )
+            .otherwise("maker")
             .alias("maker_taker"),
             F.col("event.event.index").cast("smallint").alias("market_index"),
             "event.event.client_order_id",
@@ -642,30 +619,37 @@ def cleaned_ix_settle_positions():
 # COMMAND ----------
 
 @dlt.table(
-    comment='Hourly aggregated data for funding rate',
+    comment="Hourly aggregated data for funding rate",
     table_properties={
         "quality": "gold",
-        "pipelines.autoOptimize.zOrderCols": "hour", # change
+        "pipelines.autoOptimize.zOrderCols": "hour",  # change
     },
     partition_cols=["asset"],
-    path=join(BASE_PATH_TRANSFORMED, TRANSACTIONS_TABLE, "agg-funding-rate-1h")
+    path=join(BASE_PATH_TRANSFORMED, TRANSACTIONS_TABLE, "agg-funding-rate-1h"),
 )
 def agg_funding_rate_1h():
     return (
         dlt.read_stream("cleaned_transactions")
-        .withWatermark("block_time","1 hour")
+        .withWatermark("block_time", "1 hour")
         .withColumn("instruction", F.explode("instructions"))
         .withColumn("event", F.explode("instruction.events"))
         .filter("event.name == 'apply_funding_event'")
         .groupBy(
             F.col("event.event.user").alias("pubkey"),
             "event.event.margin_account",
-            F.date_trunc("hour", "block_time").alias("hour"), # change to timestamp later
-            "event.event.asset"
+            F.date_trunc("hour", "block_time").alias(
+                "hour"
+            ),  # change to timestamp later
+            "event.event.asset",
         )
         .agg(
-            (F.sum(F.col("event.event.balance_change") / PRICE_FACTOR)).alias("balance_change")
+            (F.sum(F.col("event.event.balance_change") / PRICE_FACTOR)).alias(
+                "balance_change"
+            )
         )
         .filter("balance_change <> 0")
     )
+
+# COMMAND ----------
+
 
