@@ -243,7 +243,7 @@ def cleaned_ix_withdraw():
         "quality": "silver",
         "pipelines.autoOptimize.zOrderCols": "block_time",
     },
-    partition_cols=["date_", "underlying"],
+    partition_cols=["date_", "underlying", "expiry", "strike", "kind"],
     path=join(BASE_PATH_TRANSFORMED, TRANSACTIONS_TABLE, "cleaned-ix-place-order"),
 )
 def cleaned_ix_place_order():
@@ -301,7 +301,7 @@ def cleaned_ix_place_order():
         "quality": "silver",
         "pipelines.autoOptimize.zOrderCols": "block_time",
     },
-    partition_cols=["date_", "underlying"],
+    partition_cols=["date_", "underlying", "expiry", "strike", "kind"],
     path=join(BASE_PATH_TRANSFORMED, TRANSACTIONS_TABLE, "cleaned-ix-order-complete"),
 )
 def cleaned_ix_order_complete():

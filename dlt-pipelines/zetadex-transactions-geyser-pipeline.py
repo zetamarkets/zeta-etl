@@ -199,6 +199,7 @@ instructions array<
             named map<string, string>,
             remaining array<string>
         >,
+        program_id string,
         events array<
             struct<
                 name string,
@@ -235,7 +236,7 @@ def raw_transactions_geyser():
         .option("partitionColumns", "year,month,day,hour")
         .schema(transactions_schema)
         .load(join(BASE_PATH_LANDED, TRANSACTIONS_TABLE, "data"))
-        .dropDuplicates(["signature"])
+#         .dropDuplicates(["signature"])
     )
 
 # COMMAND ----------
@@ -257,7 +258,7 @@ def place_trade_event_merge(arr):
             p = x
         elif x.name.startswith("trade_event"):
             t = x
-    if t is not None:
+    if t is not None and p is not None:
         return ("place_order_trade_event", {**p.event, **t.event})
     else:
         return p
@@ -288,8 +289,8 @@ def cleaned_transactions_geyser():
     return (
         dlt.read_stream("raw_transactions_geyser")
         .withWatermark("block_time", "1 hour")
-        #    .dropDuplicates(["signature"])
         .filter("is_successful")
+        .dropDuplicates(["signature"])
         .drop("year", "month", "day", "hour")
         .withColumn("date_", F.to_date("block_time"))
         .withColumn("hour_", F.date_format("block_time", "HH").cast("int"))
@@ -545,7 +546,7 @@ def cleaned_ix_liquidate_geyser():
             ),
             (F.col("event.event.size") / SIZE_FACTOR).alias(
                 "liquidated_size"
-            ),  # duplicate of the args?
+            ),
             (F.col("event.event.remaining_liquidatee_balance") / PRICE_FACTOR).alias(
                 "remaining_liquidatee_balance"
             ),
@@ -622,7 +623,7 @@ def cleaned_ix_trade_geyser():
         .select(
             "signature",
             "instruction_index",
-            F.coalesce("event.event.asset", "underlying").alias("underlying"),
+            F.coalesce("underlying", "event.event.asset").alias("underlying"),
             F.col("expiry_timestamp").alias("expiry"),
             "strike",
             "kind",
@@ -641,8 +642,6 @@ def cleaned_ix_trade_geyser():
                 F.col("instruction.name").rlike("^place_(perp_)?order(_v[0-9]+)?$"),
                 "taker",
             ).otherwise("maker")
-            # F.when(F.coalesce(F.col("event.event.isTaker"), F.lit("False")).cast("boolean"), "taker")
-            #                 .otherwise("maker")
             .alias("maker_taker"),
             F.col("event.event.index").cast("smallint").alias("market_index"),
             "event.event.client_order_id",
