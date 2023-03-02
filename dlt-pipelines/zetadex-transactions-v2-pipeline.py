@@ -285,6 +285,7 @@ def cleaned_ix_place_order():
             (F.col("event.event.fee") / PRICE_FACTOR).alias("trading_fee"),
             (F.col("event.event.oracle_price") / PRICE_FACTOR).alias("oracle_price"),
             "event.event.order_id",
+            F.col("event.event.expiry_ts").cast("timestamp").alias("expiry_ts"),
             F.col("instruction.accounts.named").alias("accounts"),
             "block_time",
             "slot",

@@ -43,7 +43,7 @@ online_store = AmazonDynamoDBSpec(
   region='ap-southeast-1',
 )
 
-underlyings = ['SOL', 'BTC', 'ETH']
+underlyings = ['SOL', 'BTC', 'ETH', 'APT']
 
 # COMMAND ----------
 

@@ -523,6 +523,8 @@ def agg_maker_rewards_epoch_user_market():
     w_market = Window.partitionBy("epoch", "market").orderBy(F.desc("volume"))
     w_user = Window.partitionBy("epoch", "user")
     w = Window.partitionBy("epoch")
+    
+    num_markets_per_kind = agg_trades_rewards_epoch_user_market_v.groupBy("epoch", "kind").agg(F.countDistinct("market").alias("num_markets"))
 
     labels = spark.table("zetadex_mainnet.pubkey_label")
     maker_rewards = (
@@ -554,15 +556,16 @@ def agg_maker_rewards_epoch_user_market():
             .when(F.col("maker_tier") == 1, 0.01 / 100 * F.col("maker_volume"))
             .otherwise(0),
         )
+        .join(num_markets_per_kind, on=["epoch", "kind"], how="left")
         .withColumn(
             "maker_bonus",
             F.when(
                 (F.col("maker_market_volume_rank") == 1) & (F.col("kind") == "perp"),
-                1000,
+                3000 / F.col("num_markets"),
             )
             .when(
                 (F.col("maker_market_volume_rank") == 1) & (F.col("kind") == "future"),
-                250,
+                750 / F.col("num_markets"),
             )
             .otherwise(0),
         )
