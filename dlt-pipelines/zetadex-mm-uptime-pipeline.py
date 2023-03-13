@@ -3,9 +3,6 @@ dbutils.widgets.dropdown("network", "devnet", ["devnet", "mainnet"], "Network")
 # NETWORK = dbutils.widgets.get("network")
 NETWORK = spark.conf.get("pipeline.network")
 print(spark.conf)
-
-# COMMAND ----------
-
 import pyspark.sql.functions as F
 import pyspark.sql.types as T
 from pyspark.sql.window import Window
@@ -14,7 +11,7 @@ import dlt
 
 # COMMAND ----------
 
-MARKET_MAKER_TABLE = "market_maker_quotes"
+MARKET_MAKER_UPTIME_TABLE = "market_maker_uptime"
 
 # COMMAND ----------
 
@@ -31,27 +28,28 @@ BASE_PATH_TRANSFORMED = join("/mnt", S3_BUCKET_TRANSFORMED)
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Quotes
+# MAGIC ## Orders
 
 # COMMAND ----------
 
 # DBTITLE 1,Silver
 @dlt.table(
-    comment="Cleaned data for market maker quotes",
+    comment="Cleaned orders combining placed and completed orders",
     table_properties={
-        "quality": "silver",
-        "pipelines.autoOptimize.zOrderCols": "start_quote_interval",
+        "quality" : "silver",
+        "pipelines.autoOptimize.zOrderCols" : "date_"
     },
-    partition_cols=["underlying","expiry","strike","kind"],
-    path=join(BASE_PATH_TRANSFORMED, MARKET_MAKER_TABLE, "cleaned"),
+    partition_cols=["date_","underlying","kind"],
+    path=join(BASE_PATH_TRANSFORMED, MARKET_MAKER_UPTIME_TABLE, "orders"),
 )
-def cleaned_market_maker_quotes():
-    cleaned_ix_place_order_geyser = spark.table('zetadex_mainnet.cleaned_ix_place_order_geyser')
-    cleaned_ix_order_complete_geyser = spark.table('zetadex_mainnet.cleaned_ix_order_complete_geyser')
-    pubkey_label = spark.table('zetadex_mainnet.pubkey_label')
 
-    orders = cleaned_ix_place_order_geyser.alias('a').filter("date_ >= '2022-11-01'").join(
-        cleaned_ix_order_complete_geyser.alias('b'),
+def cleaned_mm_completed_orders():
+    cleaned_ix_place_order = spark.table('zetadex_mainnet.cleaned_ix_place_order')
+    cleaned_ix_complete_order = spark.table('zetadex_mainnet.cleaned_ix_order_complete')
+    pubkey_label = spark.table('zetadex_mainnet.pubkey_label')
+    
+    orders = cleaned_ix_place_order.alias('a').filter("date_ >= '2022-12-01'").join(
+        cleaned_ix_complete_order.alias('b'),
         ['date_', 'underlying', 'expiry', 'strike', 'kind', 'side', 'order_id'],
         how='inner'
     ).join(
@@ -76,111 +74,191 @@ def cleaned_market_maker_quotes():
         F.col('b.block_time').alias('end_time'),
         'a.date_'
     )
+    
+    return orders
 
-    quotes = orders.alias('b').join(
-        orders.alias('a'),
-        F.expr(
-          '''
-            b.pub_key = a.pub_key
-            and b.date_ = a.date_
-            and b.underlying = a.underlying
-            and b.expiry = a.expiry
-            and b.strike = a.strike
-            and b.kind = a.kind
-            and b.size = a.size
-            and b.side = 'bid'
-            and a.side = 'ask'
-            and (a.start_time < b.end_time and a.end_time > b.start_time)
-          '''
-        ),
-        how='inner'
-    ).select(
-        'b.pub_key',
-        'b.label',
-        'b.underlying',
-        'b.expiry',
-        'b.strike',
-        'b.kind',
-        F.col('b.size').alias('bid_size'),
-        F.col('a.size').alias('ask_size'),
-        (F.col('b.size') * F.col('b.price')).alias('bid_size_usd'),
-        (F.col('a.size') * F.col('a.price')).alias('ask_size_usd'),
-        F.col('b.price').alias('bid_price'),
-        F.col('a.price').alias('ask_price'),
-        (F.col('a.price') - F.col('b.price')).alias('spread'),
-        ((F.col('a.price') - F.col('b.price')) / ((F.col('a.price') + F.col('b.price')) / 2) * 100).alias('spread_basis_points'),
-        F.greatest('b.start_time', 'a.start_time').alias('start_quote'),
-        F.least('b.end_time', 'a.end_time').alias('end_quote'),
-        (F.least('b.end_time', 'a.end_time') - F.greatest('b.start_time', 'a.start_time')).alias('quote_duration'),
-        'b.date_'
-    )
+# COMMAND ----------
 
-    w_interval = Window.partitionBy('pub_key','underlying','expiry','strike','kind').orderBy("dt")
-    intervals = quotes.select(
-        'pub_key',
-        'underlying',
-        'expiry',
-        'strike',
-        'kind',
-        F.col('start_quote').alias('dt'),
-        'date_'
-    ).union(
-        quotes.select(
-          'pub_key',
-          'underlying',
-          'expiry',
-          'strike',
-          'kind',
-          F.col('end_quote').alias('dt'),
-          'date_'
-        )
-    ).select(
-        'pub_key',
-        'underlying',
-        'expiry',
-        'strike',
-        'kind',
-        F.lag('dt').over(w_interval).alias('start_interval'),
-        F.col('dt').alias('end_interval'),
-        'date_'
-    ).cache()
+# MAGIC %md
+# MAGIC 
+# MAGIC ## Quotes
 
-    merged_quotes = intervals.alias('t').join(
-        quotes.alias('q'),
-        F.expr(
-              '''
-                t.date_ = q.date_
-                and t.pub_key = q.pub_key
-                and t.underlying = q.underlying
-                and t.expiry = q.expiry
-                and t.strike = q.strike
-                and t.kind = q.kind
-                and t.start_interval < q.end_quote and t.end_interval > q.start_quote
-              '''
-        ),
-        how='inner'
-    ).groupBy(
-        F.greatest('q.start_quote', 't.start_interval').alias('start_quote_interval'), 
-        F.least('q.end_quote', 't.end_interval').alias('end_quote_interval'),
-        (F.least('q.end_quote', 't.end_interval') - F.greatest('q.start_quote', 't.start_interval')).alias('quote_duration_interval'),
-        'q.pub_key',
-        'q.label',
-        'q.underlying',
-        'q.expiry',
-        'q.strike',
-        'q.kind'
-    ).agg(
-        F.sum('bid_size').alias('total_bid_size'),
-        F.sum('ask_size').alias('total_ask_size'),
-        F.sum('bid_size_usd').alias('total_bid_size_usd'),
-        F.sum('ask_size_usd').alias('total_ask_size_usd'),
-        F.when((F.sum('bid_size_usd') >= 12500) & (F.sum('ask_size_usd') >= 12500), True).otherwise(False).alias('quote_meets_volume_criteria'),
-        (F.sum(F.col('spread') * (F.col('bid_size')+F.col('ask_size'))) / F.sum(F.col('bid_size')+F.col('ask_size'))).alias('size_weighted_mean_spread')
-    )
+# COMMAND ----------
+
+# DBTITLE 1,Silver
+@dlt.table(
+    comment="Cleaned market maker quotes",
+    table_properties={
+        "quality" : "silver",
+        "pipelines.autoOptimize.zOrderCols" : "date_"
+    },
+    partition_cols=["date_","underlying","kind"],
+    path=join(BASE_PATH_TRANSFORMED, MARKET_MAKER_UPTIME_TABLE, "quotes"),
+)
+
+def cleaned_mm_quotes():
+    orders = dlt.read("cleaned_mm_completed_orders")
     return (
-      merged_quotes.alias('q').select(
+        orders.alias('b').join(
+            orders.alias('a'),
+            F.expr(
+              '''
+                b.pub_key = a.pub_key
+                and b.date_ = a.date_
+                and b.underlying = a.underlying
+                and b.expiry = a.expiry
+                and b.strike = a.strike
+                and b.kind = a.kind
+                and b.size = a.size
+                and b.side = 'bid'
+                and a.side = 'ask'
+                and (a.start_time < b.end_time and a.end_time > b.start_time)
+              '''
+            ),
+            how='inner'
+        ).select(
+            'b.pub_key',
+            'b.label',
+            'b.underlying',
+            'b.expiry',
+            'b.strike',
+            'b.kind',
+            F.col('b.size').alias('bid_size'),
+            F.col('a.size').alias('ask_size'),
+            (F.col('b.size') * F.col('b.price')).alias('bid_size_usd'),
+            (F.col('a.size') * F.col('a.price')).alias('ask_size_usd'),
+            F.col('b.price').alias('bid_price'),
+            F.col('a.price').alias('ask_price'),
+            (F.col('a.price') - F.col('b.price')).alias('spread'),
+            ((F.col('a.price') - F.col('b.price')) / ((F.col('a.price') + F.col('b.price')) / 2) * 10000).alias('spread_basis_points'),
+            F.greatest('b.start_time', 'a.start_time').alias('start_quote'),
+            F.least('b.end_time', 'a.end_time').alias('end_quote'),
+            (F.least('b.end_time', 'a.end_time') - F.greatest('b.start_time', 'a.start_time')).alias('quote_duration'),
+            'b.date_'
+        )
+    )
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC 
+# MAGIC ## Intervals
+
+# COMMAND ----------
+
+# DBTITLE 1,Silver
+@dlt.table(
+    comment="Cleaned quote intervals",
+    table_properties={
+        "quality" : "silver",
+        "pipelines.autoOptimize.zOrderCols" : "date_"
+    },
+    partition_cols=["date_","underlying","kind"],
+    path=join(BASE_PATH_TRANSFORMED, MARKET_MAKER_UPTIME_TABLE, "intervals"),
+)
+
+def cleaned_mm_quote_intervals():
+    w_interval = Window.partitionBy('pub_key','underlying','expiry','strike','kind').orderBy("dt")
+    quotes = dlt.read('cleaned_mm_quotes')
+    return (
+        quotes.select(
+            'pub_key',
+            'underlying',
+            'expiry',
+            'strike',
+            'kind',
+            F.col('start_quote').alias('dt'),
+            'date_'
+        ).union(
+            quotes.select(
+              'pub_key',
+              'underlying',
+              'expiry',
+              'strike',
+              'kind',
+              F.col('end_quote').alias('dt'),
+              'date_'
+            )
+        ).select(
+            'pub_key',
+            'underlying',
+            'expiry',
+            'strike',
+            'kind',
+            F.lag('dt').over(w_interval).alias('start_interval'),
+            F.col('dt').alias('end_interval'),
+            'date_'
+        ).cache()
+    )
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC 
+# MAGIC ## Uptime
+
+# COMMAND ----------
+
+@dlt.table(
+    comment="Cleaned merged quotes",
+    table_properties={
+        "quality" : "silver",
+        "pipelines.autoOptimize.zOrderCols" : "date_"
+    },
+    partition_cols=["date_","underlying","kind"],
+    path=join(BASE_PATH_TRANSFORMED, MARKET_MAKER_UPTIME_TABLE, "merged-quotes"),
+)
+
+def cleaned_mm_uptime():
+    intervals = dlt.read('cleaned_mm_quote_intervals')
+    quotes = dlt.read('cleaned_mm_quotes')
+    w_merged_quotes = Window.partitionBy('q.pub_key','q.underlying','q.expiry','q.strike','q.kind',F.greatest('start_quote', 'start_interval'),F.least('end_quote', 'end_interval'))
+    
+    merged_quotes = intervals.alias('t').join(
+            quotes.alias('q'),
+            F.expr(
+                  '''
+                    t.date_ = q.date_
+                    and t.pub_key = q.pub_key
+                    and t.underlying = q.underlying
+                    and t.expiry = q.expiry
+                    and t.strike = q.strike
+                    and t.kind = q.kind
+                    and t.start_interval < q.end_quote and t.end_interval > q.start_quote
+                  '''
+            ),
+            how='inner'
+        ).select(
+        F.greatest('start_quote', 'start_interval').alias('start_quote_interval'),
+        F.least('end_quote', 'end_interval').alias('end_quote_interval'),
+        (F.greatest('start_quote', 'start_interval') - F.least('end_quote', 'end_interval')).alias('quote_duration_interval'),
         'q.*',
-        (F.col('q.size_weighted_mean_spread') / (((F.col('q.total_ask_size_usd') / F.col('q.total_ask_size')) + (F.col('q.total_bid_size_usd') / F.col('q.total_bid_size'))) / 2) * 100).alias('size_weight_spread_basis_points'),
-        F.when(((F.col('q.size_weighted_mean_spread') / (((F.col('q.total_ask_size_usd') / F.col('q.total_ask_size')) + (F.col('q.total_bid_size_usd') / F.col('q.total_bid_size'))) / 2) * 100)) <= 40, True).otherwise(False).alias('quote_meets_spread_criteria')
-      )
+        (((F.col('q.bid_size_usd')+F.col(q.ask_size_usd)) / F.sum(F.col('q.bid_size_usd')+F.col(q.ask_size_usd)).over(w_merged_quotes)) * F.col('q.spread_basis_points')).alias('size_weighted_spread_bps'),
+        ((F.col('q.bid_size_usd') / F.sum(F.col('q.bid_size_usd')).over(w_merged_quotes)) * F.col('q.bid_price')).alias('size_weighted_bid_price'),
+        ((F.col('q.ask_size_usd') / F.sum(F.col('q.ask_size_usd')).over(w_merged_quotes)) * F.col('q.ask_price')).alias('size_weighted_ask_price')
+        )
+    
+    return (
+        merged_quotes.alias('a').groupBy(
+            'a.start_quote_interval'
+            , 'a.end_quote_interval'
+            , 'a.quote_duration_interval'
+            , 'a.pub_key'
+            , 'a.label'
+            , 'a.underlying'
+            , 'a.expiry'
+            , 'a.strike'
+            , 'a.kind'
+        ).agg(
+            , F.sum('a.size_weighted_spread_bps').alias('size_weighted_spread_bps')
+            , F.sum('a.size_weighted_ask_price').alias('size_weighted_ask_price')
+            , F.sum('a.size_weighted_bid_price').alias('size_weighted_bid_price')
+            , F.count('*').alias('quotes')
+            , F.sum('a.bid_size').alias('total_bid_size')
+            , F.sum('a.ask_size').alias('total_ask_size')
+            , F.sum('a.bid_size_usd').alias('total_bid_size_usd')
+            , F.sum('a.ask_size_usd').alias('total_ask_size_usd')
+            , F.when((F.sum('bid_size_usd') >= 12500) & (F.sum('ask_size_usd') >= 12500), True).otherwise(False).alias('quote_meets_volume_criteria')
+            , F.when(F.sum('size_weighted_spread_bps') <= 30, True).otherwise(False).alias('quote_meets_spread_criteria')
+        )
     )
