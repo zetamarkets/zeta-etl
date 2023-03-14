@@ -262,9 +262,10 @@ def cleaned_ix_place_order():
         .join(
             markets_df,
             (F.col("instruction.accounts.named.market") == markets_df.market_pub_key)
-            & F.col("block_time").between(
-                markets_df.active_timestamp, markets_df.expiry_timestamp
-            ),
+            & (F.when(F.col("kind")=='perp', True).otherwise( 
+                F.col("block_time").between(
+                markets_df.active_timestamp, markets_df.expiry_timestamp)
+            )),
             how="left",
         )
         .select(
@@ -325,9 +326,10 @@ def cleaned_ix_order_complete():
         .join(
             markets_df,
             (F.col("instruction.accounts.named.market") == markets_df.market_pub_key)
-            & F.col("block_time").between(
-                markets_df.active_timestamp, markets_df.expiry_timestamp
-            ),
+            & (F.when(F.col("kind")=='perp', True).otherwise( 
+                F.col("block_time").between(
+                markets_df.active_timestamp, markets_df.expiry_timestamp)
+            )),
             how="left",
         )
         .select(
@@ -377,9 +379,11 @@ def cleaned_ix_liquidate():
         .join(
             markets_df,
             (F.col("instruction.accounts.named.market") == markets_df.market_pub_key)
-            & F.col("block_time").between(
-                markets_df.active_timestamp, markets_df.expiry_timestamp
-            ),
+            & (F.when(F.col("kind")=='perp', True).otherwise( 
+                F.col("block_time").between(
+                markets_df.active_timestamp, markets_df.expiry_timestamp)
+            )),
+            how="left",
         )
         .select(
             "signature",
@@ -468,9 +472,10 @@ def cleaned_ix_trade():
         .join(
             markets_df,
             (F.col("instruction.accounts.named.market") == markets_df.market_pub_key)
-            & F.col("block_time").between(
-                markets_df.active_timestamp, markets_df.expiry_timestamp
-            ),
+            & (F.when(F.col("kind")=='perp', True).otherwise( 
+                F.col("block_time").between(
+                markets_df.active_timestamp, markets_df.expiry_timestamp)
+            )),
             how="left",
         )
         .select(

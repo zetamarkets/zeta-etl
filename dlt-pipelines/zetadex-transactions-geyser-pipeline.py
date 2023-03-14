@@ -96,6 +96,8 @@ def cleaned_markets():
     return (
         dlt.read_stream("raw_markets")
         .withWatermark("timestamp", "1 hour")
+        # filter out perp markets that have incorrect expiry dates
+        .filter(~((F.col("kind")=='perp') & (~F.isnull("expiry_timestamp"))))
         .dropDuplicates(
             [
                 "underlying",
@@ -106,7 +108,7 @@ def cleaned_markets():
                 "market_pub_key",
             ]
         )
-        .drop("timestamp", "slot")
+        .drop("timestamp", "slot", "perp_sync_queue_head", "perp_sync_queue_length")
     )
 
 # COMMAND ----------
@@ -407,9 +409,10 @@ def cleaned_ix_place_order_geyser():
         .join(
             markets_df,
             (F.col("instruction.accounts.named.market") == markets_df.market_pub_key)
-            & F.col("block_time").between(
-                markets_df.active_timestamp, markets_df.expiry_timestamp
-            ),
+            & (F.when(F.col("kind")=='perp', True).otherwise( 
+                F.col("block_time").between(
+                markets_df.active_timestamp, markets_df.expiry_timestamp)
+            )),
             how="left",
         )
         .select(
@@ -470,9 +473,10 @@ def cleaned_ix_order_complete_geyser():
         .join(
             markets_df,
             (F.col("instruction.accounts.named.market") == markets_df.market_pub_key)
-            & F.col("block_time").between(
-                markets_df.active_timestamp, markets_df.expiry_timestamp
-            ),
+            & (F.when(F.col("kind")=='perp', True).otherwise( 
+                F.col("block_time").between(
+                markets_df.active_timestamp, markets_df.expiry_timestamp)
+            )),
             how="left",
         )
         .select(
@@ -523,9 +527,11 @@ def cleaned_ix_liquidate_geyser():
         .join(
             markets_df,
             (F.col("instruction.accounts.named.market") == markets_df.market_pub_key)
-            & F.col("block_time").between(
-                markets_df.active_timestamp, markets_df.expiry_timestamp
-            ),
+            & (F.when(F.col("kind")=='perp', True).otherwise( 
+                F.col("block_time").between(
+                markets_df.active_timestamp, markets_df.expiry_timestamp)
+            )),
+            how="left",
         )
         .select(
             "signature",
@@ -616,9 +622,10 @@ def cleaned_ix_trade_geyser():
         .join(
             markets_df,
             (F.col("instruction.accounts.named.market") == markets_df.market_pub_key)
-            & F.col("block_time").between(
-                markets_df.active_timestamp, markets_df.expiry_timestamp
-            ),
+            & (F.when(F.col("kind")=='perp', True).otherwise( 
+                F.col("block_time").between(
+                markets_df.active_timestamp, markets_df.expiry_timestamp)
+            )),
             how="left",
         )
         .select(
