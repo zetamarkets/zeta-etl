@@ -83,33 +83,42 @@ def raw_markets():
 
 # COMMAND ----------
 
-@dlt.table(
+@dlt.view()
+def cleaned_markets_v():
+    return (
+        dlt.read_stream("raw_markets")
+        .withWatermark("timestamp", "10 minutes")
+        # filter out perp markets that have incorrect expiry dates
+        .filter(~((F.col("kind")=='perp') & (~F.isnull("expiry_timestamp"))))
+        .drop("slot", "perp_sync_queue_head", "perp_sync_queue_length")
+    )
+
+dlt.create_streaming_live_table(
+    name="cleaned_markets",
     comment="Cleaned metadata for Zeta's Serum markets",
     table_properties={
         "quality": "silver",
-        "pipelines.autoOptimize.zOrderCols": "timestamp",
+        "pipelines.autoOptimize.zOrderCols": "expiry_timestamp",
     },
     partition_cols=["underlying"],
     path=join(BASE_PATH_TRANSFORMED, MARKETS_TABLE, "cleaned"),
 )
-def cleaned_markets():
-    return (
-        dlt.read_stream("raw_markets")
-        .withWatermark("timestamp", "1 hour")
-        # filter out perp markets that have incorrect expiry dates
-        .filter(~((F.col("kind")=='perp') & (~F.isnull("expiry_timestamp"))))
-        .dropDuplicates(
-            [
-                "underlying",
-                "active_timestamp",
-                "expiry_timestamp",
-                "strike",
-                "kind",
-                "market_pub_key",
-            ]
-        )
-        .drop("timestamp", "slot", "perp_sync_queue_head", "perp_sync_queue_length")
-    )
+
+dlt.apply_changes(
+    target="cleaned_markets",
+    source="cleaned_markets_v",
+    keys=[
+        "underlying",
+        "active_timestamp",
+        "expiry_timestamp",
+        "strike",
+        "kind",
+        "market_pub_key",
+    ],
+    sequence_by="timestamp",
+    stored_as_scd_type=1,
+    except_column_list = ["timestamp"],
+)
 
 # COMMAND ----------
 
@@ -118,70 +127,70 @@ def cleaned_markets():
 
 # COMMAND ----------
 
-slots_schema = """
-slot bigint,
-status string,
-type string,
-year string,
-month string,
-day string,
-hour string
-"""
+# slots_schema = """
+# slot bigint,
+# status string,
+# type string,
+# year string,
+# month string,
+# day string,
+# hour string
+# """
 
 
-@dlt.table(
-    comment="Raw data for geyser slots",
-    table_properties={
-        "quality": "bronze",
-    },
-    path=join(BASE_PATH_TRANSFORMED, SLOTS_TABLE, "raw"),
-    schema=slots_schema,
-)
-def raw_slots_geyser():
-    return (
-        spark.readStream.format("cloudFiles")
-        .option("cloudFiles.format", "json")
-        .option("cloudFiles.region", "ap-southeast-1")
-        .option("cloudFiles.includeExistingFiles", True)
-        .option("cloudFiles.useNotifications", True)
-        .option("partitionColumns", "year,month,day,hour")
-        .schema(slots_schema)
-        .load(join(BASE_PATH_LANDED, SLOTS_TABLE, "data"))
-    )
+# @dlt.table(
+#     comment="Raw data for geyser slots",
+#     table_properties={
+#         "quality": "bronze",
+#     },
+#     path=join(BASE_PATH_TRANSFORMED, SLOTS_TABLE, "raw"),
+#     schema=slots_schema,
+# )
+# def raw_slots_geyser():
+#     return (
+#         spark.readStream.format("cloudFiles")
+#         .option("cloudFiles.format", "json")
+#         .option("cloudFiles.region", "ap-southeast-1")
+#         .option("cloudFiles.includeExistingFiles", True)
+#         .option("cloudFiles.useNotifications", True)
+#         .option("partitionColumns", "year,month,day,hour")
+#         .schema(slots_schema)
+#         .load(join(BASE_PATH_LANDED, SLOTS_TABLE, "data"))
+#     )
 
 # COMMAND ----------
 
-@dlt.table(
-    comment="Cleaned data for finalized geyser slots",
-    table_properties={"quality": "silver", "pipelines.autoOptimize.zOrderCols": "slot"},
-    partition_cols=["date_"],
-    path=join(BASE_PATH_TRANSFORMED, SLOTS_TABLE, "cleaned"),
-)
-def cleaned_slots_geyser():
-    return (
-        dlt.read_stream("raw_slots_geyser")
-        .withColumn(
-            "indexed_timestamp",
-            F.to_timestamp(
-                F.concat(
-                    F.col("year"),
-                    F.lit("-"),
-                    F.col("month"),
-                    F.lit("-"),
-                    F.col("day"),
-                    F.lit(" "),
-                    F.col("hour"),
-                ),
-                "yyyy-MM-dd HH",
-            ),
-        )
-        .withWatermark("indexed_timestamp", "1 hour")
-        .filter("status == 'finalized'")
-        .select("slot", "indexed_timestamp")
-        .dropDuplicates(["slot"])
-        .withColumn("date_", F.to_date("indexed_timestamp"))
-        .withColumn("hour_", F.date_format("indexed_timestamp", "HH").cast("int"))
-    )
+# @dlt.table(
+#     comment="Cleaned data for finalized geyser slots",
+#     table_properties={"quality": "silver", "pipelines.autoOptimize.zOrderCols": "slot"},
+#     partition_cols=["date_"],
+#     path=join(BASE_PATH_TRANSFORMED, SLOTS_TABLE, "cleaned"),
+# )
+# def cleaned_slots_geyser():
+#     return (
+#         dlt.read_stream("raw_slots_geyser")
+#         .withColumn(
+#             "indexed_timestamp",
+#             F.to_timestamp(
+#                 F.concat(
+#                     F.col("year"),
+#                     F.lit("-"),
+#                     F.col("month"),
+#                     F.lit("-"),
+#                     F.col("day"),
+#                     F.lit(" "),
+#                     F.col("hour"),
+#                 ),
+#                 "yyyy-MM-dd HH",
+#             ),
+#         )
+#         .withWatermark("indexed_timestamp", "10 seconds")
+#         .filter("status == 'finalized'")
+#         .select("slot", "indexed_timestamp")
+# #         .dropDuplicates(["slot"])
+#         .withColumn("date_", F.to_date("indexed_timestamp"))
+#         .withColumn("hour_", F.date_format("indexed_timestamp", "HH").cast("int"))
+#     )
 
 # COMMAND ----------
 
@@ -272,7 +281,7 @@ def zetagroup_mapping_v():
 
 
 @dlt.view
-def cleaned_markets_v():
+def cleaned_markets_post_v():
     # return spark.table(f"zetadex_{NETWORK}.cleaned_markets")
     return dlt.read("cleaned_markets")
 
@@ -290,9 +299,9 @@ def cleaned_markets_v():
 def cleaned_transactions_geyser():
     return (
         dlt.read_stream("raw_transactions_geyser")
-        .withWatermark("block_time", "1 hour")
+        .withWatermark("block_time", "1 minute")
         .filter("is_successful")
-        .dropDuplicates(["signature"])
+#         .dropDuplicates(["signature"])
         .drop("year", "month", "day", "hour")
         .withColumn("date_", F.to_date("block_time"))
         .withColumn("hour_", F.date_format("block_time", "HH").cast("int"))
@@ -313,7 +322,7 @@ def cleaned_ix_deposit_geyser():
     zetagroup_mapping_df = dlt.read("zetagroup_mapping_v")
     return (
         dlt.read_stream("cleaned_transactions_geyser")
-        .withWatermark("block_time", "1 hour")
+        .withWatermark("block_time", "1 minute")
         .select(
             "*", F.posexplode("instructions").alias("instruction_index", "instruction")
         )
@@ -332,6 +341,7 @@ def cleaned_ix_deposit_geyser():
             "instruction.name",
             (F.col("instruction.args.amount") / PRICE_FACTOR).alias("deposit_amount"),
             F.col("instruction.accounts.named").alias("accounts"),
+            F.col("instruction.accounts.named.authority").alias("authority"),
             "underlying",
             "block_time",
             "slot",
@@ -355,7 +365,7 @@ def cleaned_ix_withdraw_geyser():
     zetagroup_mapping_df = dlt.read("zetagroup_mapping_v")
     return (
         dlt.read_stream("cleaned_transactions_geyser")
-        .withWatermark("block_time", "1 hour")
+        .withWatermark("block_time", "1 minute")
         .select(
             "*", F.posexplode("instructions").alias("instruction_index", "instruction")
         )
@@ -374,6 +384,7 @@ def cleaned_ix_withdraw_geyser():
             "instruction.name",
             (F.col("instruction.args.amount") / PRICE_FACTOR).alias("withdraw_amount"),
             F.col("instruction.accounts.named").alias("accounts"),
+            F.col("instruction.accounts.named.authority").alias("authority"),
             "underlying",
             "block_time",
             "slot",
@@ -394,10 +405,10 @@ def cleaned_ix_withdraw_geyser():
     path=join(BASE_PATH_TRANSFORMED, TRANSACTIONS_TABLE, "cleaned-ix-place-order"),
 )
 def cleaned_ix_place_order_geyser():
-    markets_df = dlt.read("cleaned_markets_v")
+    markets_df = dlt.read("cleaned_markets_post_v")
     return (
         dlt.read_stream("cleaned_transactions_geyser")
-        .withWatermark("block_time", "1 hour")
+        .withWatermark("block_time", "1 minute")
         .select(
             "*", F.posexplode("instructions").alias("instruction_index", "instruction")
         )
@@ -409,10 +420,7 @@ def cleaned_ix_place_order_geyser():
         .join(
             markets_df,
             (F.col("instruction.accounts.named.market") == markets_df.market_pub_key)
-            & (F.when(F.col("kind")=='perp', True).otherwise( 
-                F.col("block_time").between(
-                markets_df.active_timestamp, markets_df.expiry_timestamp)
-            )),
+            & ((F.col("kind")=='perp') | F.col("block_time").between(markets_df.active_timestamp, markets_df.expiry_timestamp)),
             how="left",
         )
         .select(
@@ -454,10 +462,10 @@ def cleaned_ix_place_order_geyser():
     path=join(BASE_PATH_TRANSFORMED, TRANSACTIONS_TABLE, "cleaned-ix-order-complete"),
 )
 def cleaned_ix_order_complete_geyser():
-    markets_df = dlt.read("cleaned_markets_v")
+    markets_df = dlt.read("cleaned_markets_post_v")
     return (
         dlt.read_stream("cleaned_transactions_geyser")
-        .withWatermark("block_time", "1 hour")
+        .withWatermark("block_time", "1 minute")
         .select(
             "*", F.posexplode("instructions").alias("instruction_index", "instruction")
         )
@@ -473,10 +481,7 @@ def cleaned_ix_order_complete_geyser():
         .join(
             markets_df,
             (F.col("instruction.accounts.named.market") == markets_df.market_pub_key)
-            & (F.when(F.col("kind")=='perp', True).otherwise( 
-                F.col("block_time").between(
-                markets_df.active_timestamp, markets_df.expiry_timestamp)
-            )),
+            & ((F.col("kind")=='perp') | F.col("block_time").between(markets_df.active_timestamp, markets_df.expiry_timestamp)),
             how="left",
         )
         .select(
@@ -515,10 +520,10 @@ def cleaned_ix_order_complete_geyser():
     path=join(BASE_PATH_TRANSFORMED, TRANSACTIONS_TABLE, "cleaned-ix-liquidate"),
 )
 def cleaned_ix_liquidate_geyser():
-    markets_df = dlt.read("cleaned_markets_v")
+    markets_df = dlt.read("cleaned_markets_post_v")
     return (
         dlt.read_stream("cleaned_transactions_geyser")
-        .withWatermark("block_time", "1 hour")
+        .withWatermark("block_time", "1 minute")
         .select(
             "*", F.posexplode("instructions").alias("instruction_index", "instruction")
         )
@@ -527,10 +532,7 @@ def cleaned_ix_liquidate_geyser():
         .join(
             markets_df,
             (F.col("instruction.accounts.named.market") == markets_df.market_pub_key)
-            & (F.when(F.col("kind")=='perp', True).otherwise( 
-                F.col("block_time").between(
-                markets_df.active_timestamp, markets_df.expiry_timestamp)
-            )),
+            & ((F.col("kind")=='perp') | F.col("block_time").between(markets_df.active_timestamp, markets_df.expiry_timestamp)),
             how="left",
         )
         .select(
@@ -565,6 +567,7 @@ def cleaned_ix_liquidate_geyser():
                 "underlying_price"
             ),
             F.col("instruction.accounts.named").alias("accounts"),
+            F.col("instruction.accounts.named.liquidated_margin_account").alias("liquidated_margin_account"),
             "block_time",
             "slot",
         )
@@ -593,10 +596,10 @@ def cleaned_ix_liquidate_geyser():
     path=join(BASE_PATH_TRANSFORMED, TRANSACTIONS_TABLE, "cleaned-ix-trade"),
 )
 def cleaned_ix_trade_geyser():
-    markets_df = dlt.read("cleaned_markets_v")
+    markets_df = dlt.read("cleaned_markets_post_v")
     df = (
         dlt.read_stream("cleaned_transactions_geyser")
-        .withWatermark("block_time", "1 hour")
+        .withWatermark("block_time", "1 minute")
         .select(
             "*", F.posexplode("instructions").alias("instruction_index", "instruction")
         )
@@ -622,10 +625,7 @@ def cleaned_ix_trade_geyser():
         .join(
             markets_df,
             (F.col("instruction.accounts.named.market") == markets_df.market_pub_key)
-            & (F.when(F.col("kind")=='perp', True).otherwise( 
-                F.col("block_time").between(
-                markets_df.active_timestamp, markets_df.expiry_timestamp)
-            )),
+            & ((F.col("kind")=='perp') | F.col("block_time").between(markets_df.active_timestamp, markets_df.expiry_timestamp)),
             how="left",
         )
         .select(
@@ -688,7 +688,7 @@ def cleaned_ix_position_movement_geyser():
     zetagroup_mapping_df = dlt.read("zetagroup_mapping_v")
     return (
         dlt.read_stream("cleaned_transactions_geyser")
-        .withWatermark("block_time", "1 hour")
+        .withWatermark("block_time", "1 minute")
         .select(
             "*", F.posexplode("instructions").alias("instruction_index", "instruction")
         )
@@ -742,7 +742,7 @@ def cleaned_ix_settle_positions_geyser():
     zetagroup_mapping_df = dlt.read("zetagroup_mapping_v")
     return (
         dlt.read_stream("cleaned_transactions_geyser")
-        .withWatermark("block_time", "1 hour")
+        .withWatermark("block_time", "1 minute")
         .select(
             "*", F.posexplode("instructions").alias("instruction_index", "instruction")
         )
@@ -786,7 +786,7 @@ def cleaned_ix_settle_positions_geyser():
 def agg_funding_rate_1h():
     return (
         dlt.read_stream("cleaned_transactions_geyser")
-        .withWatermark("block_time", "1 hour")
+        .withWatermark("block_time", "1 minute")
         .withColumn("instruction", F.explode("instructions"))
         .withColumn("event", F.explode("instruction.events"))
         .filter("event.name == 'apply_funding_event'")
@@ -820,7 +820,7 @@ def agg_funding_rate_1h():
 def agg_ix_deposit_u1h_geyser():
     return (
         dlt.read_stream("cleaned_ix_deposit_geyser")
-        .withWatermark("block_time", "1 hour")
+        .withWatermark("block_time", "1 minute")
         .groupBy(
             F.window("block_time", "1 hour").alias("timestamp_window"),
             F.col("accounts.authority").alias("owner_pub_key"),
@@ -855,7 +855,7 @@ def agg_ix_deposit_u1h_geyser():
 def agg_ix_withdraw_u1h_geyser():
     return (
         dlt.read_stream("cleaned_ix_withdraw_geyser")
-        .withWatermark("block_time", "1 hour")
+        .withWatermark("block_time", "1 minute")
         .groupBy(
             F.window("block_time", "1 hour").alias("timestamp_window"),
             F.col("accounts.authority").alias("owner_pub_key"),
@@ -932,20 +932,16 @@ def raw_pnl():
 def cleaned_pnl_geyser():
     deposits_df = (
         dlt.read("agg_ix_deposit_u1h_geyser")
-        #                  .withColumn("date_hour", F.date_trunc("hour", F.col("timestamp_window.start")))
-        #                  .withWatermark("date_hour", "1 hour")
         .drop("date_", "hour_")
     )
     withdrawals_df = (
         dlt.read("agg_ix_withdraw_u1h_geyser")
-        #                  .withColumn("date_hour", F.date_trunc("hour", F.col("timestamp_window.start")))
-        #                  .withWatermark("date_hour", "1 hour")
         .drop("date_", "hour_")
     )
     return (
         dlt.read("raw_pnl")  # ideally would be read_stream (TODO)
-        .withWatermark("timestamp", "1 hour")
-        .dropDuplicates(["owner_pub_key", "underlying", "year", "month", "day", "hour"])
+        # .withWatermark("timestamp", "1 minute")
+#         .dropDuplicates(["owner_pub_key", "underlying", "year", "month", "day", "hour"])
         .join(
             deposits_df.alias("d"),
             F.expr(
@@ -1064,7 +1060,7 @@ windowSpecDiffRank30d = Window.partitionBy("date_", "hour_").orderBy(
 def agg_pnl_geyser():
     return (
         dlt.read("cleaned_pnl_geyser")
-        .withWatermark("timestamp", "1 hour")
+        .withWatermark("timestamp", "10 minutes")
         .groupBy("timestamp", "date_", "hour_", "owner_pub_key")
         .agg(
             F.sum("pnl").alias("pnl"),
