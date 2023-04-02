@@ -92,7 +92,6 @@ def raw_transactions():
         .option("partitionColumns", "year,month,day,hour")
         .schema(transactions_schema)
         .load(join(BASE_PATH_LANDED, TRANSACTIONS_TABLE, "data"))
-        # .dropDuplicates(["signature"])
     )
 
 # COMMAND ----------
@@ -143,9 +142,9 @@ def cleaned_markets_v():
 def cleaned_transactions():
     return (
         dlt.read_stream("raw_transactions")
-        .withWatermark("block_time", "1 hour")
+        .withWatermark("block_time", "1 minute")
         .filter("is_successful")
-        .dropDuplicates(["signature"])
+#         .dropDuplicates(["signature"])
         .drop("year", "month", "day", "hour")
         .withColumn("date_", F.to_date("block_time"))
         .withColumn("hour_", F.date_format("block_time", "HH").cast("int"))
@@ -166,7 +165,7 @@ def cleaned_ix_deposit():
     zetagroup_mapping_df = dlt.read("zetagroup_mapping_v")
     return (
         dlt.read_stream("cleaned_transactions")
-        .withWatermark("block_time", "1 hour")
+        .withWatermark("block_time", "1 minute")
         .select(
             "*", F.posexplode("instructions").alias("instruction_index", "instruction")
         )
@@ -208,7 +207,7 @@ def cleaned_ix_withdraw():
     zetagroup_mapping_df = dlt.read("zetagroup_mapping_v")
     return (
         dlt.read_stream("cleaned_transactions")
-        .withWatermark("block_time", "1 hour")
+        .withWatermark("block_time", "1 minute")
         .select(
             "*", F.posexplode("instructions").alias("instruction_index", "instruction")
         )
@@ -250,7 +249,7 @@ def cleaned_ix_place_order():
     markets_df = dlt.read("cleaned_markets_v")
     return (
         dlt.read_stream("cleaned_transactions")
-        .withWatermark("block_time", "1 hour")
+        .withWatermark("block_time", "1 minute")
         .select(
             "*", F.posexplode("instructions").alias("instruction_index", "instruction")
         )
@@ -262,9 +261,7 @@ def cleaned_ix_place_order():
         .join(
             markets_df,
             (F.col("instruction.accounts.named.market") == markets_df.market_pub_key)
-            & F.col("block_time").between(
-                markets_df.active_timestamp, markets_df.expiry_timestamp
-            ),
+            & ((F.col("kind")=='perp') | F.col("block_time").between(markets_df.active_timestamp, markets_df.expiry_timestamp)),
             how="left",
         )
         .select(
@@ -309,7 +306,7 @@ def cleaned_ix_order_complete():
     markets_df = dlt.read("cleaned_markets_v")
     return (
         dlt.read_stream("cleaned_transactions")
-        .withWatermark("block_time", "1 hour")
+        .withWatermark("block_time", "1 minute")
         .select(
             "*", F.posexplode("instructions").alias("instruction_index", "instruction")
         )
@@ -325,9 +322,7 @@ def cleaned_ix_order_complete():
         .join(
             markets_df,
             (F.col("instruction.accounts.named.market") == markets_df.market_pub_key)
-            & F.col("block_time").between(
-                markets_df.active_timestamp, markets_df.expiry_timestamp
-            ),
+            & ((F.col("kind")=='perp') | F.col("block_time").between(markets_df.active_timestamp, markets_df.expiry_timestamp)),
             how="left",
         )
         .select(
@@ -368,7 +363,7 @@ def cleaned_ix_liquidate():
     markets_df = dlt.read("cleaned_markets_v")
     return (
         dlt.read_stream("cleaned_transactions")
-        .withWatermark("block_time", "1 hour")
+        .withWatermark("block_time", "1 minute")
         .select(
             "*", F.posexplode("instructions").alias("instruction_index", "instruction")
         )
@@ -377,9 +372,8 @@ def cleaned_ix_liquidate():
         .join(
             markets_df,
             (F.col("instruction.accounts.named.market") == markets_df.market_pub_key)
-            & F.col("block_time").between(
-                markets_df.active_timestamp, markets_df.expiry_timestamp
-            ),
+            & ((F.col("kind")=='perp') | F.col("block_time").between(markets_df.active_timestamp, markets_df.expiry_timestamp)),
+            how="left",
         )
         .select(
             "signature",
@@ -411,6 +405,7 @@ def cleaned_ix_liquidate():
                 "underlying_price"
             ),
             F.col("instruction.accounts.named").alias("accounts"),
+            F.col("instruction.accounts.named.liquidated_margin_account").alias("liquidated_margin_account"),
             "block_time",
             "slot",
         )
@@ -442,7 +437,7 @@ def cleaned_ix_trade():
     markets_df = dlt.read("cleaned_markets_v")
     df = (
         dlt.read_stream("cleaned_transactions")
-        .withWatermark("block_time", "1 hour")
+        .withWatermark("block_time", "1 minute")
         .select(
             "*", F.posexplode("instructions").alias("instruction_index", "instruction")
         )
@@ -468,9 +463,7 @@ def cleaned_ix_trade():
         .join(
             markets_df,
             (F.col("instruction.accounts.named.market") == markets_df.market_pub_key)
-            & F.col("block_time").between(
-                markets_df.active_timestamp, markets_df.expiry_timestamp
-            ),
+            & ((F.col("kind")=='perp') | F.col("block_time").between(markets_df.active_timestamp, markets_df.expiry_timestamp)),
             how="left",
         )
         .select(
@@ -534,7 +527,7 @@ def cleaned_ix_position_movement():
     zetagroup_mapping_df = dlt.read("zetagroup_mapping_v")
     return (
         dlt.read_stream("cleaned_transactions")
-        .withWatermark("block_time", "1 hour")
+        .withWatermark("block_time", "1 minute")
         .select(
             "*", F.posexplode("instructions").alias("instruction_index", "instruction")
         )
@@ -588,7 +581,7 @@ def cleaned_ix_settle_positions():
     zetagroup_mapping_df = dlt.read("zetagroup_mapping_v")
     return (
         dlt.read_stream("cleaned_transactions")
-        .withWatermark("block_time", "1 hour")
+        .withWatermark("block_time", "1 minute")
         .select(
             "*", F.posexplode("instructions").alias("instruction_index", "instruction")
         )
@@ -631,7 +624,7 @@ def cleaned_ix_settle_positions():
 def agg_funding_rate_1h():
     return (
         dlt.read_stream("cleaned_transactions")
-        .withWatermark("block_time", "1 hour")
+        .withWatermark("block_time", "1 minute")
         .withColumn("instruction", F.explode("instructions"))
         .withColumn("event", F.explode("instruction.events"))
         .filter("event.name == 'apply_funding_event'")
