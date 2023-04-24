@@ -135,7 +135,8 @@ dlt.create_streaming_live_table(
     name="cleaned_referrals",
     comment="Cleaned and deduped referrers and referrals",
     table_properties={
-        "quality": "silver"
+        "quality": "silver",
+        # "delta.enableChangeDataFeed" = "true"
     }
 )
 

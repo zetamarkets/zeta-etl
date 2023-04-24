@@ -12,7 +12,7 @@ import pyspark.sql.types as T
 from pytz import timezone
 from datetime import datetime, timezone
 # from delta.tables import DeltaTable
-# delta = DeltaTable.forPath(spark, "zetadex_mainnet.agg_trades_market_1h") # or DeltaTable.forName
+# delta = DeltaTable.forPath(spark, "zetadex_mainnet_tx.agg_ix_trade_market_1h") # or DeltaTable.forName
 # delta.upgradeTableProtocol(2, 5) # upgrades to readerVersion=2, writerVersion=5
 
 # COMMAND ----------
@@ -21,11 +21,11 @@ from datetime import datetime, timezone
 # Don't need to run these again since they're once-off FS definition creations
 
 # fs.create_table(
-#     name='zetadex_feature_store.agg_prices_market_1h',
-#     primary_keys=["timestamp"],
-#     df=agg_trades_24h_rolling_df,
-#     partition_columns="date_",
-#     description="Rolling 24hr trade summary metrics",
+#     name="zetadex_feature_store.agg_pnl",
+#     primary_keys=["owner_pub_key"],
+#     df="zetadex_mainnet_tx.agg_pnl",
+#     # partition_columns="date_",
+#     description="Zeta DEX Account PNLs",
 # )
 
 # COMMAND ----------
@@ -43,26 +43,16 @@ online_store = AmazonDynamoDBSpec(
     region="ap-southeast-1",
 )
 
-underlyings = ["SOL", "BTC", "ETH", "APT", "ARB"]
+assets = ["SOL", "BTC", "ETH", "APT", "ARB"]
 
 # COMMAND ----------
 
-# MAGIC %md
-# MAGIC # Testing Cells
+# # No transformations, just use the 'agg_funding_rate_1h' table
 
-# COMMAND ----------
+# table_name = "zetadex_feature_store.agg_funding_TESTING"
 
-# table_name = "zetadex_feature_store.cleaned_ix_withdraw_geyser_TEST"
-
-# withdrawals_df = (
-#     spark.table("zetadex_mainnet.cleaned_ix_withdraw_geyser")
-#     .dropna(how='any', subset=["withdraw_amount", "underlying", "authority", "signature"])
-#     .where(F.col("withdraw_amount") != 0)
-#     .withColumnRenamed("block_time", "timestamp")
-#     .withColumnRenamed("authority", "pubkey")
-# )
-# withdrawals_df = withdrawals_df["pubkey", "signature", "underlying", "timestamp", "withdraw_amount"].dropDuplicates(['signature', 'withdraw_amount', 'underlying', 'pubkey', 'timestamp'])
-# withdrawals_df.show()
+# agg_funding_df = spark.table("zetadex_mainnet_tx.agg_funding_rate_1h")
+# agg_funding_df.show()
 
 # try:
 #     result = fs.get_table(table_name)
@@ -72,15 +62,15 @@ underlyings = ["SOL", "BTC", "ETH", "APT", "ARB"]
 #     print("Creating New Table...")
 #     fs.create_table(
 #         name=table_name,
-#         primary_keys=["pubkey", "timestamp"],
-#         df=withdrawals_df,
-#         description="Withdrawals Table",
+#         primary_keys=["margin_account", "timestamp"],
+#         df=agg_funding_df,
+#         description=f"1h aggregated funding",
 #     )
 
 # # Write new results to table
 # fs.write_table(
 #     name=table_name,
-#     df=withdrawals_df,
+#     df=agg_funding_df,
 #     mode="merge",
 # )
 
@@ -88,13 +78,7 @@ underlyings = ["SOL", "BTC", "ETH", "APT", "ARB"]
 #     name=table_name,
 #     online_store=online_store,
 #     #   filter_condition=f"date_ = '{current_date}' and hour_ = '{current_hour}'",
-#     features=[
-#         "pubkey",
-#         "timestamp",
-#         "signature",
-#         "underlying",
-#         "withdraw_amount"
-#     ],
+#     features=["asset", "margin_account", "pubkey", "balance_change", "timestamp"],
 #     mode="merge",
 # )
 
@@ -105,210 +89,13 @@ underlyings = ["SOL", "BTC", "ETH", "APT", "ARB"]
 
 # COMMAND ----------
 
-# DBTITLE 1,zetadex_feature_store.cleaned_ix_withdraw_geyser
-table_name = "zetadex_feature_store.cleaned_ix_withdraw_geyser"
-
-withdrawals_df = (
-    spark.table("zetadex_mainnet.cleaned_ix_withdraw_geyser")
-    .dropna(how='any', subset=["withdraw_amount", "underlying", "authority", "signature"])
-    .where(F.col("withdraw_amount") != 0)
-    .withColumnRenamed("block_time", "timestamp")
-    .withColumnRenamed("authority", "pubkey")
-    .withColumn(
-        "ddb_key",
-        F.concat(
-            F.col("pubkey"),
-            F.lit("#"),
-            F.col("signature"),
-            F.lit("#"),
-            F.col("underlying"),
-            F.lit("#"),
-            F.unix_timestamp(F.col("timestamp")),
-            F.lit("#"),
-            F.col("withdraw_amount")
-        ),
-    )
-)
-withdrawals_df = withdrawals_df["ddb_key", "pubkey", "signature", "underlying", "timestamp", "withdraw_amount"].dropDuplicates(['signature', 'withdraw_amount', 'underlying', 'pubkey', 'timestamp'])
-withdrawals_df.show()
-
-try:
-    result = fs.get_table(table_name)
-    print(result)
-    print("Table Already Exists...")
-except Exception:
-    print("Creating New Table...")
-    fs.create_table(
-        name=table_name,
-        primary_keys="ddb_key",
-        df=withdrawals_df,
-        description="Withdrawals Table",
-    )
-
-# Write new results to table
-fs.write_table(
-    name=table_name,
-    df=withdrawals_df,
-    mode="merge",
-)
-
-fs.publish_table(
-    name=table_name,
-    online_store=online_store,
-    #   filter_condition=f"date_ = '{current_date}' and hour_ = '{current_hour}'",
-    features=[
-        "ddb_key",
-        "pubkey",
-        "signature",
-        "underlying",
-        "timestamp",
-        "withdraw_amount"
-    ],
-    mode="merge",
-)
-
-# COMMAND ----------
-
-# DBTITLE 1,zetadex_feature_store.cleaned_ix_deposit_geyser
-table_name = "zetadex_feature_store.cleaned_ix_deposit_geyser"
-
-deposits_df = (
-    spark.table("zetadex_mainnet.cleaned_ix_deposit_geyser")
-    .dropna(how='any', subset=["deposit_amount", "underlying", "authority", "signature"])
-    .where(F.col("deposit_amount") != 0)
-    .withColumnRenamed("block_time", "timestamp")
-    .withColumnRenamed("authority", "pubkey")
-    .withColumn(
-        "ddb_key",
-        F.concat(
-            F.col("pubkey"),
-            F.lit("#"),
-            F.col("signature"),
-            F.lit("#"),
-            F.col("underlying"),
-            F.lit("#"),
-            F.unix_timestamp(F.col("timestamp")),
-            F.lit("#"),
-            F.col("deposit_amount")
-        ),
-    )
-)
-deposits_df = deposits_df["ddb_key", "pubkey", "signature", "underlying", "timestamp", "deposit_amount"].dropDuplicates(['signature', 'deposit_amount', 'underlying', 'pubkey', 'timestamp'])
-deposits_df.show()
-
-try:
-    result = fs.get_table(table_name)
-    print(result)
-    print("Table Already Exists...")
-except Exception:
-    print("Creating New Table...")
-    fs.create_table(
-        name=table_name,
-        primary_keys="ddb_key",
-        df=deposits_df,
-        description="Deposits Table",
-    )
-
-# Write new results to table
-fs.write_table(
-    name=table_name,
-    df=deposits_df,
-    mode="merge",
-)
-
-fs.publish_table(
-    name=table_name,
-    online_store=online_store,
-    #   filter_condition=f"date_ = '{current_date}' and hour_ = '{current_hour}'",
-    features=[
-        "ddb_key",
-        "pubkey",
-        "signature",
-        "underlying",
-        "timestamp",
-        "deposit_amount"
-    ],
-    mode="merge",
-)
-
-# COMMAND ----------
-
-# DBTITLE 1,zetadex_feature_store.cleaned_ix_liquidate_geyser
-table_name = "zetadex_feature_store.cleaned_ix_liquidate_geyser"
-
-liquidations_df = (
-    spark.table("zetadex_mainnet.cleaned_ix_liquidate_geyser")
-    .dropna(how='any', subset=["liquidated_margin_account", "liquidated_size", "mark_price"])
-    .where(F.col("liquidated_size") != 0)
-    .withColumnRenamed("block_time", "timestamp")
-    .withColumnRenamed("liquidated_margin_account", "pubkey")
-    .withColumn(
-        "ddb_key",
-        F.concat(
-            F.col("pubkey"),
-            F.lit("#"),
-            F.col("signature"),
-            F.lit("#"),
-            F.col("underlying"),
-            F.lit("#"),
-            F.unix_timestamp(F.col("timestamp")),
-            F.lit("#"),
-            F.col("liquidated_size"),
-            F.lit("#"),
-            F.col("mark_price"),
-        ),
-    )
-)
-liquidations_df = liquidations_df[
-    "ddb_key", "pubkey", "signature", "underlying", "timestamp", "liquidated_size", "mark_price"
-].dropDuplicates(['signature', 'liquidated_size', 'mark_price', 'underlying', 'pubkey', 'timestamp'])
-liquidations_df.show()
-
-try:
-    result = fs.get_table(table_name)
-    print(result)
-    print("Table Already Exists...")
-except Exception:
-    print("Creating New Table...")
-    fs.create_table(
-        name=table_name,
-        primary_keys="ddb_key",
-        df=liquidations_df,
-        description="Liquidations Table",
-    )
-
-# Write new results to table
-fs.write_table(
-    name=table_name,
-    df=liquidations_df,
-    mode="merge",
-)
-
-fs.publish_table(
-    name=table_name,
-    online_store=online_store,
-    #   filter_condition=f"date_ = '{current_date}' and hour_ = '{current_hour}'",
-    features=[
-        "ddb_key",
-        "pubkey",
-        "signature",
-        "underlying",
-        "timestamp",
-        "liquidated_size",
-        "mark_price",
-    ],
-    mode="merge",
-)
-
-# COMMAND ----------
-
 # DBTITLE 1,zetadex_feature_store.agg_funding (ALL)
 # No transformations, just use the 'agg_funding_rate_1h' table
 
-table_name = "zetadex_feature_store.agg_funding"
+table_name = "zetadex_feature_store.agg_funding_v2"
 
-agg_funding_df = spark.table("zetadex_mainnet.agg_funding_rate_1h").withColumn(
-    "ddb_key", F.concat(F.col("margin_account"), F.lit("#"), F.col("hour"))
+agg_funding_df = spark.table("zetadex_mainnet_tx.agg_funding_rate_1h").withColumn(
+    "ddb_key", F.concat(F.col("margin_account"), F.lit("#"), F.col("timestamp"))
 )
 agg_funding_df.show()
 
@@ -336,39 +123,40 @@ fs.publish_table(
     name=table_name,
     online_store=online_store,
     #   filter_condition=f"date_ = '{current_date}' and hour_ = '{current_hour}'",
-    features=["ddb_key", "asset", "margin_account", "pubkey", "balance_change", "hour"],
+    features=["ddb_key", "asset", "margin_account", "pubkey", "balance_change", "timestamp"],
     mode="merge",
 )
 
 # COMMAND ----------
 
 # DBTITLE 1,zetadex_mainnet.agg_pnl
+# table_name = "zetadex_feature_store.agg_pnl"
+
 # fs.register_table(
-#   delta_table="zetadex_mainnet.agg_pnl_geyser",
-#   primary_keys='owner_pub_key',
+#   delta_table="zetadex_mainnet_tx.agg_pnl",
+#   primary_keys='authority',
 #   description='Zeta DEX Account PNLs'
 # )
 
 max_date_row = (
-    spark.table("zetadex_mainnet.agg_pnl_geyser").agg({"date_": "max"}).collect()
+    spark.table("zetadex_mainnet_tx.agg_pnl").agg({"date_": "max"}).collect()
 )[0]
 print(max_date_row["max(date_)"])
 max_hour_row = (
-    spark.table("zetadex_mainnet.agg_pnl_geyser")
+    spark.table("zetadex_mainnet_tx.agg_pnl")
     .filter(F.col("date_") == max_date_row["max(date_)"])
     .agg({"hour_": "max"})
     .collect()
 )[0]
 print(max_hour_row["max(hour_)"])
-# max_hour = (spark.table('zetadex_mainnet.agg_pnl_geyser').agg({"date_": "max"}).collect())[0]
 
 fs.publish_table(
-    name="zetadex_mainnet.agg_pnl_geyser",
+    name="zetadex_mainnet_tx.agg_pnl",
     online_store=online_store,
     filter_condition=f"date_ = '{max_date_row['max(date_)']}' and hour_ = '{max_hour_row['max(hour_)']}'",
     features=[
         "timestamp",
-        "owner_pub_key",
+        "authority",
         "pnl",
         "pnl_diff_24h",
         "pnl_diff_7d",
@@ -389,215 +177,21 @@ fs.publish_table(
 # COMMAND ----------
 
 # DBTITLE 1,zetadex_feature_store.agg_trades_24h_rolling_df (ALL)
+table_name = "zetadex_feature_store.agg_trades_24h_rolling"
+
 # On the fly transformation to get the last 24hrs volume from our 1h agg'ed tables
 agg_trades_24h_rolling_df = (
-    spark.table("zetadex_mainnet.agg_trades_1h")
+    spark.table("zetadex_mainnet_tx.agg_ix_trade_1h")
     .filter(
         F.col("timestamp_window.start")
         >= (F.date_trunc("hour", F.current_timestamp()) - F.expr("INTERVAL 24 HOUR"))
     )
     .agg(
         F.sum("trades_count").alias("trades_count"),
-        F.sum("volume").alias("volume"),
-        F.sum("notional_volume").alias("notional_volume"),
-        F.sum("premium_sum").alias("premium_sum"),
+        F.sum("notional").alias("notional"),
     )
     .withColumn("timestamp", F.date_trunc("hour", F.current_timestamp()))
-    .withColumn("date_", F.to_date("timestamp"))
-    .withColumn("hour_", F.date_format("timestamp", "HH").cast("int"))
 )
-agg_trades_24h_rolling_df.show()
-# Write new results to table
-fs.write_table(
-    name="zetadex_feature_store.agg_trades_24h_rolling",
-    df=agg_trades_24h_rolling_df,
-    mode="merge",
-)
-
-fs.publish_table(
-    name="zetadex_feature_store.agg_trades_24h_rolling",
-    online_store=online_store,
-    #   filter_condition=f"date_ = '{current_date}' and hour_ = '{current_hour}'",
-    features=["trades_count", "volume", "notional_volume", "premium_sum", "timestamp"],
-    mode="merge",
-)
-
-# COMMAND ----------
-
-# DBTITLE 1,zetadex_feature_store.agg_trades_24h_rolling_df (underlying)
-for underlying in underlyings:
-    table_name = "zetadex_feature_store.agg_trades_24h_rolling_" + underlying.lower()
-    print(f"Underlying: {underlying}")
-    print(f"Table Name: {table_name}")
-
-    # On the fly transformation to get the last 24hrs volume from our 1h agg'ed tables
-    agg_trades_24h_rolling_df_underlying = (
-        spark.table("zetadex_mainnet.agg_trades_market_1h")
-        .filter(
-            F.col("timestamp_window.start")
-            >= (
-                F.date_trunc("hour", F.current_timestamp()) - F.expr("INTERVAL 24 HOUR")
-            )
-        )
-        .filter(F.col("underlying") == underlying)
-        .agg(
-            F.sum("trades_count").alias("trades_count"),
-            F.sum("volume").alias("volume"),
-            F.sum("notional_volume").alias("notional_volume"),
-            F.sum("premium_sum").alias("premium_sum"),
-        )
-        .withColumn("timestamp", F.date_trunc("hour", F.current_timestamp()))
-        .withColumn("date_", F.to_date("timestamp"))
-        .withColumn("hour_", F.date_format("timestamp", "HH").cast("int"))
-    )
-    agg_trades_24h_rolling_df_underlying.show()
-
-    try:
-        result = fs.get_table(table_name)
-        print(result)
-        print("Table Already Exists...")
-    except Exception:
-        print("Creating New Table...")
-        fs.create_table(
-            name=table_name,
-            primary_keys=["timestamp"],
-            df=agg_trades_24h_rolling_df_underlying,
-            partition_columns="date_",
-            description=f"Rolling 24hr trade summary metrics {underlying}",
-        )
-
-    # Write new results to table
-    fs.write_table(
-        name=table_name,
-        df=agg_trades_24h_rolling_df_underlying,
-        mode="merge",
-    )
-
-    fs.publish_table(
-        name=table_name,
-        online_store=online_store,
-        #   filter_condition=f"date_ = '{current_date}' and hour_ = '{current_hour}'",
-        features=[
-            "trades_count",
-            "volume",
-            "notional_volume",
-            "premium_sum",
-            "timestamp",
-        ],
-        mode="merge",
-    )
-
-# COMMAND ----------
-
-# DBTITLE 1,zetadex_feature_store.agg_trades_24h_rolling_market
-for underlying in underlyings:
-    table_name = (
-        "zetadex_feature_store.agg_trades_24h_rolling_market_" + underlying.lower()
-    )
-    print(f"Underlying: {underlying}")
-    print(f"Table Name: {table_name}")
-
-    # On the fly transformation to get the last 24hrs volume from our 1h agg'ed tables
-    agg_trades_24h_rolling_df_market = (
-        spark.table("zetadex_mainnet.agg_trades_market_1h")
-        .withColumn(
-            "ddb_key",
-            F.concat(
-                F.col("underlying"),
-                F.lit("#"),
-                F.unix_timestamp(F.col("expiry_timestamp")),
-                F.lit("#"),
-                F.col("kind"),
-                F.lit("#"),
-                F.col("strike"),
-            ),
-        )
-        .filter(F.col("underlying") == underlying)
-        .filter(
-            F.col("timestamp_window.start")
-            >= (
-                F.date_trunc("hour", F.current_timestamp()) - F.expr("INTERVAL 24 HOUR")
-            )
-        )
-        .groupby("ddb_key")
-        .agg(
-            F.sum("trades_count").alias("trades_count"),
-            F.sum("volume").alias("volume"),
-            F.sum("notional_volume").alias("notional_volume"),
-            F.sum("premium_sum").alias("premium_sum"),
-            F.first("underlying"),
-            F.first("expiry_timestamp"),
-        )
-        .withColumnRenamed("first(underlying)", "underlying")
-        .withColumnRenamed("first(expiry_timestamp)", "expiry_timestamp")
-        .withColumn("timestamp", F.date_trunc("hour", F.current_timestamp()))
-        .withColumn("date_", F.to_date("timestamp"))
-        .withColumn("hour_", F.date_format("timestamp", "HH").cast("int"))
-    )
-    agg_trades_24h_rolling_df_market.show()
-
-    try:
-        result = fs.get_table(table_name)
-        print(result)
-        print("Table Already Exists...")
-    except Exception:
-        print("Creating New Table...")
-        fs.create_table(
-            name=table_name,
-            primary_keys=["ddb_key"],
-            df=agg_trades_24h_rolling_df_market,
-            description=f"Rolling 24hr volumes per market {table_name}",
-        )
-
-    # Write new results to table
-    fs.write_table(
-        name=table_name,
-        df=agg_trades_24h_rolling_df_market,
-        mode="merge",
-    )
-
-    fs.publish_table(
-        name=table_name,
-        online_store=online_store,
-        features=[
-            "ddb_key",
-            "trades_count",
-            "volume",
-            "notional_volume",
-            "premium_sum",
-            "timestamp",
-            "underlying",
-            "expiry_timestamp",
-        ],
-        mode="merge",
-    )
-
-# COMMAND ----------
-
-# DBTITLE 1,zetadex_feature_store.agg_surfaces_expiry_1h
-table_name = "zetadex_feature_store.agg_surfaces_expiry_1h_v2"
-
-row1 = (
-    spark.table("zetadex_mainnet.agg_surfaces_expiry_1h")
-    .agg({"timestamp": "max"})
-    .collect()
-)[0]
-print(row1["max(timestamp)"])
-
-agg_surfaces_expiry_1h_df = (
-    spark.table("zetadex_mainnet.agg_surfaces_expiry_1h")
-    .filter(F.col("timestamp") == row1["max(timestamp)"])
-    .withColumn(
-        "ddb_key",
-        F.concat(
-            F.col("underlying"), F.lit("#"), F.unix_timestamp(F.col("expiry_timestamp"))
-        ),
-    )
-)
-agg_surfaces_expiry_1h_df = agg_surfaces_expiry_1h_df.drop(
-    "timestamp_window", "underlying", "date_", "hour_"
-)
-agg_surfaces_expiry_1h_df.show()
 
 try:
     result = fs.get_table(table_name)
@@ -607,15 +201,68 @@ except Exception:
     print("Creating New Table...")
     fs.create_table(
         name=table_name,
-        primary_keys="ddb_key",
-        df=agg_surfaces_expiry_1h_df,
-        description="Aggregated surfaces expiry 1h",
+        primary_keys=["timestamp"],
+        df=agg_trades_24h_rolling_df,
+        # partition_columns="date_",
+        description=f"Rolling 24hr trade summary metrics {asset}",
+    )
+
+agg_trades_24h_rolling_df.show()
+# Write new results to table
+fs.write_table(
+    name=table_name,
+    df=agg_trades_24h_rolling_df,
+    mode="merge",
+)
+
+fs.publish_table(
+    name=table_name,
+    online_store=online_store,
+    #   filter_condition=f"date_ = '{current_date}' and hour_ = '{current_hour}'",
+    features=["trades_count", "notional", "timestamp"],
+    mode="merge",
+)
+
+# COMMAND ----------
+
+# DBTITLE 1,zetadex_feature_store.agg_trades_24h_rolling_df (asset)
+table_name = "zetadex_feature_store.agg_trades_24h_rolling_asset"
+
+# On the fly transformation to get the last 24hrs volume from our 1h agg'ed tables
+agg_trades_24h_rolling_asset_df = (
+    spark.table("zetadex_mainnet_tx.agg_ix_trade_market_1h")
+    .filter(
+        F.col("timestamp_window.start")
+        >= (
+            F.date_trunc("hour", F.current_timestamp()) - F.expr("INTERVAL 24 HOUR")
+        )
+    )
+    .groupBy("asset")
+    .agg(
+        F.sum("trades_count").alias("trades_count"),
+        F.sum("notional").alias("notional"),
+    )
+    .withColumn("timestamp", F.date_trunc("hour", F.current_timestamp()))
+)
+
+try:
+    result = fs.get_table(table_name)
+    print(result)
+    print("Table Already Exists...")
+except Exception:
+    print("Creating New Table...")
+    fs.create_table(
+        name=table_name,
+        primary_keys=["timestamp", "asset"],
+        df=agg_trades_24h_rolling_asset_df,
+        # partition_columns="date_",
+        description=f"Rolling 24hr trade summary metrics per asset",
     )
 
 # Write new results to table
 fs.write_table(
     name=table_name,
-    df=agg_surfaces_expiry_1h_df,
+    df=agg_trades_24h_rolling_asset_df,
     mode="merge",
 )
 
@@ -624,14 +271,214 @@ fs.publish_table(
     online_store=online_store,
     #   filter_condition=f"date_ = '{current_date}' and hour_ = '{current_hour}'",
     features=[
-        "ddb_key",
-        "interest_rate",
-        "vol_surface",
+        "trades_count",
+        "notional",
         "timestamp",
-        "expiry_timestamp",
     ],
     mode="merge",
 )
+
+# for asset in assets:
+#     table_name = "zetadex_feature_store.agg_trades_24h_rolling_" + asset.lower()
+#     print(f"Underlying: {asset}")
+#     print(f"Table Name: {table_name}")
+
+#     # On the fly transformation to get the last 24hrs volume from our 1h agg'ed tables
+#     agg_trades_24h_rolling_df_asset = (
+#         spark.table("zetadex_mainnet_tx.agg_ix_trade_market_1h")
+#         .filter(
+#             F.col("timestamp_window.start")
+#             >= (
+#                 F.date_trunc("hour", F.current_timestamp()) - F.expr("INTERVAL 24 HOUR")
+#             )
+#         )
+#         .filter(F.col("asset") == asset)
+#         .agg(
+#             F.sum("trades_count").alias("trades_count"),
+#             F.sum("notional").alias("notional"),
+#         )
+#         .withColumn("timestamp", F.date_trunc("hour", F.current_timestamp()))
+#     )
+#     # agg_trades_24h_rolling_df_asset.show()
+
+#     try:
+#         result = fs.get_table(table_name)
+#         print(result)
+#         print("Table Already Exists...")
+#     except Exception:
+#         print("Creating New Table...")
+#         fs.create_table(
+#             name=table_name,
+#             primary_keys=["timestamp"],
+#             df=agg_trades_24h_rolling_df_asset,
+#             partition_columns="date_",
+#             description=f"Rolling 24hr trade summary metrics {asset}",
+#         )
+
+#     # Write new results to table
+#     fs.write_table(
+#         name=table_name,
+#         df=agg_trades_24h_rolling_df_asset,
+#         mode="merge",
+#     )
+
+#     fs.publish_table(
+#         name=table_name,
+#         online_store=online_store,
+#         #   filter_condition=f"date_ = '{current_date}' and hour_ = '{current_hour}'",
+#         features=[
+#             "trades_count",
+#             "notional",
+#             "timestamp",
+#         ],
+#         mode="merge",
+#     )
+
+# COMMAND ----------
+
+# DBTITLE 1,zetadex_feature_store.agg_trades_24h_rolling_market
+# for underlying in underlyings:
+#     table_name = (
+#         "zetadex_feature_store.agg_trades_24h_rolling_market_" + underlying.lower()
+#     )
+#     print(f"Underlying: {underlying}")
+#     print(f"Table Name: {table_name}")
+
+    # On the fly transformation to get the last 24hrs volume from our 1h agg'ed tables
+    # agg_trades_24h_rolling_df_market = (
+    #     spark.table("zetadex_mainnet_tx.agg_ix_trade_market_1h")
+    #     .withColumn(
+    #         "ddb_key",
+    #         F.concat(
+    #             F.col("underlying"),
+    #             F.lit("#"),
+    #             F.unix_timestamp(F.col("expiry_timestamp")),
+    #             F.lit("#"),
+    #             F.col("kind"),
+    #             F.lit("#"),
+    #             F.col("strike"),
+    #         ),
+    #     )
+    #     .filter(F.col("underlying") == underlying)
+    #     .filter(
+    #         F.col("timestamp_window.start")
+    #         >= (
+    #             F.date_trunc("hour", F.current_timestamp()) - F.expr("INTERVAL 24 HOUR")
+    #         )
+    #     )
+    #     .groupby("ddb_key")
+    #     .agg(
+    #         F.sum("trades_count").alias("trades_count"),
+    #         F.sum("volume").alias("volume"),
+    #         F.sum("notional_volume").alias("notional_volume"),
+    #         F.sum("premium_sum").alias("premium_sum"),
+    #         F.first("underlying"),
+    #         F.first("expiry_timestamp"),
+    #     )
+    #     .withColumnRenamed("first(underlying)", "underlying")
+    #     .withColumnRenamed("first(expiry_timestamp)", "expiry_timestamp")
+    #     .withColumn("timestamp", F.date_trunc("hour", F.current_timestamp()))
+    #     .withColumn("date_", F.to_date("timestamp"))
+    #     .withColumn("hour_", F.date_format("timestamp", "HH").cast("int"))
+    # )
+    # agg_trades_24h_rolling_df_market.show()
+
+    # try:
+    #     result = fs.get_table(table_name)
+    #     print(result)
+    #     print("Table Already Exists...")
+    # except Exception:
+    #     print("Creating New Table...")
+    #     fs.create_table(
+    #         name=table_name,
+    #         primary_keys=["ddb_key"],
+    #         df=agg_trades_24h_rolling_df_market,
+    #         description=f"Rolling 24hr volumes per market {table_name}",
+    #     )
+
+    # # Write new results to table
+    # fs.write_table(
+    #     name=table_name,
+    #     df=agg_trades_24h_rolling_df_market,
+    #     mode="merge",
+    # )
+
+    # fs.publish_table(
+    #     name=table_name,
+    #     online_store=online_store,
+    #     features=[
+    #         "ddb_key",
+    #         "trades_count",
+    #         "volume",
+    #         "notional_volume",
+    #         "premium_sum",
+    #         "timestamp",
+    #         "underlying",
+    #         "expiry_timestamp",
+    #     ],
+    #     mode="merge",
+    # )
+
+# COMMAND ----------
+
+# DBTITLE 1,zetadex_feature_store.agg_surfaces_expiry_1h
+# table_name = "zetadex_feature_store.agg_surfaces_expiry_1h_v2"
+
+# row1 = (
+#     spark.table("zetadex_mainnet.agg_surfaces_expiry_1h")
+#     .agg({"timestamp": "max"})
+#     .collect()
+# )[0]
+# print(row1["max(timestamp)"])
+
+# agg_surfaces_expiry_1h_df = (
+#     spark.table("zetadex_mainnet.agg_surfaces_expiry_1h")
+#     .filter(F.col("timestamp") == row1["max(timestamp)"])
+#     .withColumn(
+#         "ddb_key",
+#         F.concat(
+#             F.col("underlying"), F.lit("#"), F.unix_timestamp(F.col("expiry_timestamp"))
+#         ),
+#     )
+# )
+# agg_surfaces_expiry_1h_df = agg_surfaces_expiry_1h_df.drop(
+#     "timestamp_window", "underlying", "date_", "hour_"
+# )
+# agg_surfaces_expiry_1h_df.show()
+
+# try:
+#     result = fs.get_table(table_name)
+#     print(result)
+#     print("Table Already Exists...")
+# except Exception:
+#     print("Creating New Table...")
+#     fs.create_table(
+#         name=table_name,
+#         primary_keys="ddb_key",
+#         df=agg_surfaces_expiry_1h_df,
+#         description="Aggregated surfaces expiry 1h",
+#     )
+
+# # Write new results to table
+# fs.write_table(
+#     name=table_name,
+#     df=agg_surfaces_expiry_1h_df,
+#     mode="merge",
+# )
+
+# fs.publish_table(
+#     name=table_name,
+#     online_store=online_store,
+#     #   filter_condition=f"date_ = '{current_date}' and hour_ = '{current_hour}'",
+#     features=[
+#         "ddb_key",
+#         "interest_rate",
+#         "vol_surface",
+#         "timestamp",
+#         "expiry_timestamp",
+#     ],
+#     mode="merge",
+# )
 
 # COMMAND ----------
 
@@ -663,14 +510,6 @@ agg_prices_market_1h_df = agg_prices_market_1h_df.drop(
     "timestamp_window", "underlying", "strike", "kind", "date_", "hour_"
 )
 agg_prices_market_1h_df.show()
-
-# fs.create_table(
-#     name='zetadex_feature_store.agg_prices_market_1h_v3',
-#     primary_keys="ddb_key",
-#     df=agg_prices_market_1h_df,
-#     description="Aggregated options markets 1h",
-# )
-
 
 # Write new results to table
 fs.write_table(
@@ -771,12 +610,6 @@ except Exception:
     put_call_ratio = 0
 print(put_call_ratio)
 
-# put_call_ratio = agg_prices_market_total_puts.collect()[0]['total_open_interest'] / agg_prices_market_total_calls.collect()[0]['total_open_interest']
-# print(put_call_ratio)
-# agg_prices_market_total_puts.show()
-# agg_prices_market_total_calls.show()
-
-
 agg_prices_market_total_df = agg_prices_market_total_df.withColumn(
     "put_call_ratio", F.lit(put_call_ratio).cast("double")
 )
@@ -810,7 +643,7 @@ fs.publish_table(
 
 # COMMAND ----------
 
-# DBTITLE 1,zetadex_feature_store.agg_prices_market_oi (underlying)
+# DBTITLE 1,zetadex_feature_store.agg_prices_market_oi (asset)
 for underlying in underlyings:
     table_name = "zetadex_feature_store.agg_prices_market_oi_" + underlying.lower()
     print(f"Underlying: {underlying}")
@@ -928,130 +761,124 @@ for underlying in underlyings:
 
 # COMMAND ----------
 
-# DBTITLE 1,Perp 24h Volume (zetadex_feature_store.agg_trades_24h_rolling_perp_<underlying>)
-for underlying in underlyings:
-    table_name = (
-        "zetadex_feature_store.agg_trades_24h_rolling_perp_" + underlying.lower()
-    )
-    print(f"Underlying: {underlying}")
-    print(f"Table Name: {table_name}")
+# DBTITLE 1,Perp 24h Volume (zetadex_feature_store.agg_trades_24h_rolling_perp_<asset>)
+# for asset in assets:
+#     table_name = (
+#         "zetadex_feature_store.agg_trades_24h_rolling_perp_" + asset.lower()
+#     )
+#     print(f"Underlying: {asset}")
+#     print(f"Table Name: {table_name}")
 
-    # On the fly transformation to get the last 24hrs volume from our 1h agg'ed tables
-    agg_trades_24h_rolling_df_perp_underlying = (
-        spark.table("zetadex_mainnet.agg_trades_market_1h")
-        .filter(
-            F.col("timestamp_window.start")
-            >= (
-                F.date_trunc("hour", F.current_timestamp()) - F.expr("INTERVAL 24 HOUR")
-            )
-        )
-        .filter(F.col("underlying") == underlying)
-        .filter(F.col("kind") == "perp")
-        .agg(
-            F.sum("trades_count").alias("trades_count"),
-            F.sum("volume").alias("volume"),
-            F.sum("notional_volume").alias("notional_volume"),
-            F.sum("premium_sum").alias("premium_sum"),
-        )
-        .withColumn("timestamp", F.date_trunc("hour", F.current_timestamp()))
-        .withColumn("date_", F.to_date("timestamp"))
-        .withColumn("hour_", F.date_format("timestamp", "HH").cast("int"))
-    )
-    agg_trades_24h_rolling_df_perp_underlying.show()
+#     # On the fly transformation to get the last 24hrs volume from our 1h agg'ed tables
+#     agg_trades_24h_rolling_df_perp_asset = (
+#         spark.table("zetadex_mainnet_tx.agg_ix_trade_market_1h")
+#         .filter(
+#             F.col("timestamp_window.start")
+#             >= (
+#                 F.date_trunc("hour", F.current_timestamp()) - F.expr("INTERVAL 24 HOUR")
+#             )
+#         )
+#         .filter(F.col("asset") == asset)
+#         .filter(F.col("kind") == "perp")
+#         .agg(
+#             F.sum("trades_count").alias("trades_count"),
+#             F.sum("notional").alias("notional"),
+#         )
+#         .withColumn("timestamp", F.date_trunc("hour", F.current_timestamp()))
+#     )
+#     agg_trades_24h_rolling_df_perp_asset.show()
 
-    try:
-        result = fs.get_table(table_name)
-        print(result)
-        print("Table Already Exists...")
-    except Exception:
-        print("Creating New Table...")
-        fs.create_table(
-            name=table_name,
-            primary_keys=["timestamp"],
-            df=agg_trades_24h_rolling_df_perp_underlying,
-            partition_columns="date_",
-            description=f"Rolling 24hr trade summary metrics {underlying}",
-        )
+#     try:
+#         result = fs.get_table(table_name)
+#         print(result)
+#         print("Table Already Exists...")
+#     except Exception:
+#         print("Creating New Table...")
+#         fs.create_table(
+#             name=table_name,
+#             primary_keys=["timestamp"],
+#             df=agg_trades_24h_rolling_df_perp_asset,
+#             partition_columns="date_",
+#             description=f"Rolling 24hr trade summary metrics {underlying}",
+#         )
 
-    # Write new results to table
-    fs.write_table(
-        name=table_name,
-        df=agg_trades_24h_rolling_df_perp_underlying,
-        mode="merge",
-    )
+#     # Write new results to table
+#     fs.write_table(
+#         name=table_name,
+#         df=agg_trades_24h_rolling_df_perp_asset,
+#         mode="merge",
+#     )
 
-    fs.publish_table(
-        name=table_name,
-        online_store=online_store,
-        #   filter_condition=f"date_ = '{current_date}' and hour_ = '{current_hour}'",
-        features=[
-            "trades_count",
-            "volume",
-            "notional_volume",
-            "premium_sum",
-            "timestamp",
-        ],
-        mode="merge",
-    )
+#     fs.publish_table(
+#         name=table_name,
+#         online_store=online_store,
+#         #   filter_condition=f"date_ = '{current_date}' and hour_ = '{current_hour}'",
+#         features=[
+#             "trades_count",
+#             "notional",
+#             "timestamp",
+#         ],
+#         mode="merge",
+#     )
 
 # COMMAND ----------
 
 # DBTITLE 1,Perp OI (zetadex_feature_store.agg_prices_market_oi_perp_<underlying>)
-for underlying in underlyings:
-    table_name = "zetadex_feature_store.agg_prices_market_oi_perp_" + underlying.lower()
-    print(f"Underlying: {underlying}")
-    print(f"Table Name: {table_name}")
+# for underlying in underlyings:
+#     table_name = "zetadex_feature_store.agg_prices_market_oi_perp_" + underlying.lower()
+#     print(f"Underlying: {underlying}")
+#     print(f"Table Name: {table_name}")
 
-    row1 = (
-        spark.table("zetadex_mainnet.agg_prices_market_1h")
-        .agg({"timestamp": "max"})
-        .collect()
-    )[0]
-    print(row1["max(timestamp)"])
+#     row1 = (
+#         spark.table("zetadex_mainnet.agg_prices_market_1h")
+#         .agg({"timestamp": "max"})
+#         .collect()
+#     )[0]
+#     print(row1["max(timestamp)"])
 
-    agg_prices_market_total_df_underlying = (
-        spark.table("zetadex_mainnet.agg_prices_market_1h")
-        .filter(F.col("kind") == "perp")
-        .filter(F.col("timestamp") == row1["max(timestamp)"])
-        .filter(F.col("underlying") == underlying)
-        .groupBy()
-        .sum("open_interest", "open_interest_usd")
-        .drop(
-            "sum(strike)",
-            "sum(theo)",
-            "sum(delta)",
-            "sum(vega)",
-            "sum(sigma)",
-            "sum(hour_)",
-        )
-        .withColumn("timestamp", F.lit(row1["max(timestamp)"]))
-        .withColumnRenamed("sum(open_interest)", "total_open_interest")
-        .withColumnRenamed("sum(open_interest_usd)", "total_open_interest_usd")
-    )
+#     agg_prices_market_total_df_underlying = (
+#         spark.table("zetadex_mainnet.agg_prices_market_1h")
+#         .filter(F.col("kind") == "perp")
+#         .filter(F.col("timestamp") == row1["max(timestamp)"])
+#         .filter(F.col("underlying") == underlying)
+#         .groupBy()
+#         .sum("open_interest", "open_interest_usd")
+#         .drop(
+#             "sum(strike)",
+#             "sum(theo)",
+#             "sum(delta)",
+#             "sum(vega)",
+#             "sum(sigma)",
+#             "sum(hour_)",
+#         )
+#         .withColumn("timestamp", F.lit(row1["max(timestamp)"]))
+#         .withColumnRenamed("sum(open_interest)", "total_open_interest")
+#         .withColumnRenamed("sum(open_interest_usd)", "total_open_interest_usd")
+#     )
 
-    agg_prices_market_total_df_underlying.show()
+#     agg_prices_market_total_df_underlying.show()
 
-    try:
-        result = fs.get_table(table_name)
-        print(result)
-        print("Table Already Exists...")
-    except Exception:
-        print("Creating New Table...")
-        fs.create_table(
-            name=table_name,
-            primary_keys="timestamp",
-            df=agg_prices_market_total_df_underlying,
-            description=f"Aggregated total open interest {underlying}",
-        )
+#     try:
+#         result = fs.get_table(table_name)
+#         print(result)
+#         print("Table Already Exists...")
+#     except Exception:
+#         print("Creating New Table...")
+#         fs.create_table(
+#             name=table_name,
+#             primary_keys="timestamp",
+#             df=agg_prices_market_total_df_underlying,
+#             description=f"Aggregated total open interest {underlying}",
+#         )
 
-    # Write new results to table
-    fs.write_table(
-        name=table_name,
-        df=agg_prices_market_total_df_underlying,
-        mode="merge",
-    )
+#     # Write new results to table
+#     fs.write_table(
+#         name=table_name,
+#         df=agg_prices_market_total_df_underlying,
+#         mode="merge",
+#     )
 
-    fs.publish_table(name=table_name, online_store=online_store, mode="merge")
+#     fs.publish_table(name=table_name, online_store=online_store, mode="merge")
 
 # COMMAND ----------
 
@@ -1059,7 +886,7 @@ for underlying in underlyings:
 tables = ["maker", "taker", "referee", "referrer"]
 for item in tables:
     table_name = f"zetadex_feature_store.agg_{item}_rewards_epoch_user"
-    spark_table_name = f"zetadex_mainnet.agg_{item}_rewards_epoch_user"
+    spark_table_name = f"zetadex_mainnet_rewards.agg_{item}_rewards_epoch_user"
     row1 = (spark.table(spark_table_name).agg({"epoch": "max"}).collect())[0]
     print(row1["max(epoch)"])
     if item == "maker" or item == "taker":
@@ -1100,7 +927,7 @@ for item in tables:
 tables = ["maker", "taker", "referee", "referrer"]
 for item in tables:
     table_name = f"zetadex_feature_store.agg_{item}_rewards_epoch_user_historical"
-    spark_table_name = f"zetadex_mainnet.agg_{item}_rewards_epoch_user"
+    spark_table_name = f"zetadex_mainnet_rewards.agg_{item}_rewards_epoch_user"
 
     if item == "maker" or item == "taker":
         user = "user"
@@ -1177,10 +1004,6 @@ fs.write_table(
 )
 
 fs.publish_table(name=table_name, online_store=online_store, mode="merge")
-
-# COMMAND ----------
-
-
 
 # COMMAND ----------
 

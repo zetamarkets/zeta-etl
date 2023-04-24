@@ -187,6 +187,36 @@ def cleaned_trades():
                 ).otherwise(0.05 / 100 * F.col("notional")), # 5bps
             ).otherwise(0),
         )
+        .withColumn(
+            "market",
+            F.when(
+                F.col("kind") == "perp",
+                F.concat("raw_trades.underlying", F.lit("-"), F.upper("kind")),
+            )
+            .when(
+                F.col("kind") == "future",
+                F.concat(
+                    "raw_trades.underlying",
+                    F.lit("-"),
+                    F.upper(F.date_format("expiry_timestamp", "dMMMyy")),
+                ),
+            )
+            .otherwise(
+                F.concat(
+                    "raw_trades.underlying",
+                    F.lit("-"),
+                    F.upper(F.date_format("expiry_timestamp", "dMMMyy")),
+                    F.lit("-"),
+                    F.col("strike").cast("int"),
+                    F.lit("-"),
+                    F.substring(F.upper("kind"), 0, 1),
+                )
+            ),
+        )  # standardising to Deribit naming convention
+        .withColumn(
+            "epoch", F.date_trunc("week", F.expr("raw_trades.timestamp - interval 104 hours"))
+        )
+        .withColumn("epoch", F.expr("epoch + interval 104 hours"))
         .select(
             "raw_trades.timestamp",
             "raw_trades.underlying",
@@ -203,9 +233,11 @@ def cleaned_trades():
             "notional",
             "approx_fees",
             "market_index",
+            "market",
             "seq_num",
             "order_id",
             "client_order_id",
+            "epoch",
         )
         .withColumn("date_", F.to_date("timestamp"))
         .withColumn("hour_", F.date_format("timestamp", "HH").cast("int"))
@@ -361,7 +393,6 @@ def cleaned_prices():
     return (
         dlt.read_stream("raw_prices")
         .withWatermark("timestamp", "1 minute")
-        #      .dropDuplicates(["slot", "market_index", "expiry_timestamp", "underlying"])
         .withColumn("open_interest_usd", F.col("open_interest") * F.col("theo"))
         .join(
             prices_df,
@@ -452,41 +483,15 @@ def agg_prices_market_1h():
 # COMMAND ----------
 
 # DBTITLE 1,Silver
-@dlt.view(comment="Trade data used for rewards")
-def cleaned_trades_rewards_v():
+@dlt.table(comment="Trade data used for rewards", temporary=True)
+def cleaned_trades_rewards():
     df = (
         dlt.read("cleaned_trades")
-        .withColumn(
-            "market",
-            F.when(
-                F.col("kind") == "perp",
-                F.concat("underlying", F.lit("-"), F.upper("kind")),
-            )
-            .when(
-                F.col("kind") == "future",
-                F.concat(
-                    "underlying",
-                    F.lit("-"),
-                    F.upper(F.date_format("expiry_timestamp", "dMMMyy")),
-                ),
-            )
-            .otherwise(
-                F.concat(
-                    "underlying",
-                    F.lit("-"),
-                    F.upper(F.date_format("expiry_timestamp", "dMMMyy")),
-                    F.lit("-"),
-                    F.col("strike").cast("int"),
-                    F.lit("-"),
-                    F.substring(F.upper("kind"), 0, 1),
-                )
-            ),
-        )  # standardising to Deribit naming convention
         .withColumnRenamed("owner_pub_key", "user")
         .withColumn(
             "maker_taker", F.when(F.col("is_maker"), "maker").otherwise("taker")
         )
-        .select("timestamp", "kind", "market", "user", "maker_taker", "notional", F.col("approx_fees").alias("fees"))
+        .select("timestamp", "epoch", "kind", "market", "user", "maker_taker", "notional", F.col("approx_fees").alias("fees"))
     )
     return df
 
@@ -496,11 +501,7 @@ def cleaned_trades_rewards_v():
 @dlt.view(comment="Trade data used for rewards aggregated by epoch")
 def agg_trades_rewards_epoch_user_market_v():
     return (
-        dlt.read("cleaned_trades_rewards_v")
-        .withColumn(
-            "epoch", F.date_trunc("week", F.expr("timestamp - interval 104 hours"))
-        )
-        .withColumn("epoch", F.expr("epoch + interval 104 hours"))
+        dlt.read("cleaned_trades_rewards")
         .groupBy("epoch", "kind", "market", "user", "maker_taker")
         .agg(
             F.sum("notional").alias("volume"),
@@ -523,8 +524,10 @@ def agg_maker_rewards_epoch_user_market():
     w_market = Window.partitionBy("epoch", "market").orderBy(F.desc("volume"))
     w_user = Window.partitionBy("epoch", "user")
     w = Window.partitionBy("epoch")
-    
-    num_markets_per_kind = agg_trades_rewards_epoch_user_market_v.groupBy("epoch", "kind").agg(F.countDistinct("market").alias("num_markets"))
+
+    num_markets_per_kind = agg_trades_rewards_epoch_user_market_v.groupBy(
+        "epoch", "kind"
+    ).agg(F.countDistinct("market").alias("num_markets"))
 
     labels = spark.table("zetadex_mainnet.pubkey_label")
     maker_rewards = (
@@ -708,7 +711,7 @@ def agg_bonk_rewards_epoch_user():
     )
 
     df = (
-        dlt.read("cleaned_trades_rewards_v")
+        dlt.read("cleaned_trades_rewards")
         .filter("timestamp >= '2023-01-05'")
         .filter("maker_taker == 'taker'")
         .filter(F.col("kind").isin(["perp", "future"]))
@@ -728,7 +731,9 @@ def agg_bonk_rewards_epoch_user():
             how="left",
         )
         .select("t.*", "cg.price_usd")
-        .withColumn("bonk_bonus", F.least(F.col("taker_fees"),F.lit(10)) / F.col("price_usd")) # cap to 10 USDC per hour
+        .withColumn(
+            "bonk_bonus", F.least(F.col("taker_fees"), F.lit(10)) / F.col("price_usd")
+        )  # cap to 10 USDC per hour
         .select(
             "*",
             F.sum("taker_volume").over(w_cumsum).alias("taker_volume_cumsum"),
@@ -748,7 +753,7 @@ def agg_bonk_rewards_epoch_user():
 # DBTITLE 1,Gold
 @dlt.view
 def agg_trades_rewards_epoch_referee_referrer_v():
-    cleaned_trades_rewards_v = dlt.read("cleaned_trades_rewards_v")
+    cleaned_trades_rewards_v = dlt.read("cleaned_trades_rewards")
     referrals = spark.table("zetadex_mainnet.cleaned_referrals")
 
     return (
@@ -765,10 +770,6 @@ def agg_trades_rewards_epoch_referee_referrer_v():
             ),
             how="inner",
         )
-        .withColumn(
-            "epoch", F.date_trunc("week", F.expr("timestamp - interval 104 hours"))
-        )
-        .withColumn("epoch", F.expr("epoch + interval 104 hours"))
         .groupBy("epoch", "referee", "referrer", "alias")
         .agg(
             F.sum("notional").alias("volume"),
