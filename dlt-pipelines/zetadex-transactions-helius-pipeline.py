@@ -76,46 +76,6 @@ def raw_markets():
 
 # COMMAND ----------
 
-@dlt.view()
-def cleaned_markets_v():
-    return (
-        dlt.read_stream("raw_markets")
-        .withWatermark("timestamp", "10 minutes")
-        # filter out non perp markets
-        .filter((F.col("kind")=='perp') & (F.isnull("expiry_timestamp")))
-        .drop("slot", "perp_sync_queue_head", "perp_sync_queue_length")
-        .withColumnRenamed("underlying", "asset")
-    )
-
-dlt.create_streaming_live_table(
-    name="cleaned_markets",
-    comment="Cleaned metadata for Zeta's Serum markets",
-    table_properties={
-        "quality": "silver",
-        "pipelines.autoOptimize.zOrderCols": "expiry_timestamp",
-    },
-    partition_cols=["asset"],
-    path=join(BASE_PATH_TRANSFORMED, MARKETS_TABLE, "cleaned"),
-)
-
-dlt.apply_changes(
-    target="cleaned_markets",
-    source="cleaned_markets_v",
-    keys=[
-        "asset",
-        "active_timestamp",
-        "expiry_timestamp",
-        "strike",
-        "kind",
-        "market_pub_key",
-    ],
-    sequence_by="timestamp",
-    stored_as_scd_type=1,
-    except_column_list = ["timestamp"],
-)
-
-# COMMAND ----------
-
 # MAGIC %md
 # MAGIC ## Transactions
 
@@ -197,7 +157,10 @@ def place_trade_event_merge(arr):
 
 @dlt.view
 def zetagroup_mapping_v():
-    return spark.table(f"zetadex_{NETWORK}.zetagroup_mapping").withColumnRenamed("underlying", "asset")
+    return spark.table(f"zetadex_{NETWORK}.zetagroup_mapping").withColumnRenamed(
+        "underlying", "asset"
+    )
+
 
 # Transactions
 @dlt.table(
@@ -239,7 +202,7 @@ def cleaned_ix_deposit():
         .select(
             "*", F.posexplode("instructions").alias("instruction_index", "instruction")
         )
-        .filter("instruction.name == 'deposit'")
+        .filter(F.col("instruction.name").startswith("deposit"))
         .join(
             zetagroup_mapping_df,
             (
@@ -280,7 +243,7 @@ def cleaned_ix_withdraw():
         .select(
             "*", F.posexplode("instructions").alias("instruction_index", "instruction")
         )
-        .filter(f"instruction.name == 'withdraw'")
+        .filter(F.col("instruction.name").startswith("withdraw"))
         .join(
             zetagroup_mapping_df,
             (
@@ -314,7 +277,7 @@ def cleaned_ix_withdraw():
     path=join(BASE_PATH_TRANSFORMED, TRANSACTIONS_TABLE, "cleaned-ix-place-order"),
 )
 def cleaned_ix_place_order():
-    markets_df = dlt.read("cleaned_markets")
+    markets_df = spark.table("zetadex_mainnet_tx.cleaned_markets")
     return (
         dlt.read_stream("cleaned_transactions")
         .withWatermark("block_time", "1 minute")
@@ -325,7 +288,7 @@ def cleaned_ix_place_order():
             F.col("instruction.name").rlike("^place_(perp_)?order(_v[0-9]+)?$")
         )  # place_order and place_perp_order variants
         .withColumn("event", F.explode("instruction.events"))
-        .filter("event.name == 'place_order_event'")
+        .filter(F.col("event.name").startswith("place_order_event"))
         .join(
             markets_df,
             (F.col("instruction.accounts.named.market") == markets_df.market_pub_key),
@@ -365,7 +328,7 @@ def cleaned_ix_place_order():
     path=join(BASE_PATH_TRANSFORMED, TRANSACTIONS_TABLE, "cleaned-ix-order-complete"),
 )
 def cleaned_ix_order_complete():
-    markets_df = dlt.read("cleaned_markets")
+    markets_df = spark.table("zetadex_mainnet_tx.cleaned_markets")
     return (
         dlt.read_stream("cleaned_transactions")
         .withWatermark("block_time", "1 minute")
@@ -373,14 +336,14 @@ def cleaned_ix_order_complete():
             "*", F.posexplode("instructions").alias("instruction_index", "instruction")
         )
         .filter(
-            (F.col("instruction.name") == "crank_event_queue")  # maker fill
+            (F.col("instruction.name").startswith("crank_event_queue"))  # maker fill
             | F.col("instruction.name").rlike(
                 "^place_(perp_)?order(_v[0-9]+)?$"
             )  # taker fill
             | F.col("instruction.name").contains("cancel")  # cancel
         )
         .withColumn("event", F.explode("instruction.events"))
-        .filter("event.name == 'order_complete_event'")
+        .filter(F.col("event.name").startswith("order_complete_event"))
         .join(
             markets_df,
             (F.col("instruction.accounts.named.market") == markets_df.market_pub_key),
@@ -416,15 +379,16 @@ def cleaned_ix_order_complete():
     path=join(BASE_PATH_TRANSFORMED, TRANSACTIONS_TABLE, "cleaned-ix-liquidate"),
 )
 def cleaned_ix_liquidate():
-    markets_df = dlt.read("cleaned_markets")
+    markets_df = spark.table("zetadex_mainnet_tx.cleaned_markets")
     return (
         dlt.read_stream("cleaned_transactions")
         .withWatermark("block_time", "1 minute")
         .select(
             "*", F.posexplode("instructions").alias("instruction_index", "instruction")
         )
-        .filter("instruction.name == 'liquidate'")
-        .withColumn("event", F.col("instruction.events")[0])
+        .filter(F.col("instruction.name").startswith("liquidate"))
+        .withColumn("event", F.explode("instruction.events"))
+        .filter(F.col("event.name").startswith("liquidation_event"))
         .join(
             markets_df,
             (F.col("instruction.accounts.named.market") == markets_df.market_pub_key),
@@ -433,10 +397,12 @@ def cleaned_ix_liquidate():
         .select(
             "signature",
             "instruction_index",
-            "asset",
-            # "instruction.accounts.named.authority", # TODO need this instrumented
+            F.coalesce("asset", F.upper("event.event.asset")).alias("asset"),
             "instruction.name",
             (F.col("instruction.args.size") / SIZE_FACTOR).alias("desired_size"),
+            F.when(F.col("event.event.size") > 0, "bid").otherwise("ask").alias("side"),
+            "event.event.liquidatee",
+            "event.event.liquidator",
             (F.col("event.event.liquidator_reward") / PRICE_FACTOR).alias(
                 "liquidator_reward"
             ),
@@ -446,7 +412,7 @@ def cleaned_ix_liquidate():
             (F.col("event.event.cost_of_trades") / PRICE_FACTOR).alias(
                 "cost_of_trades"
             ),
-            (F.col("event.event.size") / SIZE_FACTOR).alias("liquidated_size"),
+            (F.abs("event.event.size") / SIZE_FACTOR).alias("liquidated_size"),
             (F.col("event.event.remaining_liquidatee_balance") / PRICE_FACTOR).alias(
                 "remaining_liquidatee_balance"
             ),
@@ -454,11 +420,11 @@ def cleaned_ix_liquidate():
                 "remaining_liquidator_balance"
             ),
             (F.col("event.event.mark_price") / PRICE_FACTOR).alias("mark_price"),
-            (F.col("event.event.underlying_price") / PRICE_FACTOR).alias(
-                "index_price"
-            ),
+            (F.col("event.event.underlying_price") / PRICE_FACTOR).alias("index_price"),
             F.col("instruction.accounts.named").alias("accounts"),
-            F.col("instruction.accounts.named.liquidated_margin_account").alias("liquidated_margin_account"),
+            F.col("instruction.accounts.named.liquidated_margin_account").alias(
+                "liquidated_margin_account"
+            ),
             "block_time",
             "slot",
         )
@@ -485,7 +451,7 @@ def cleaned_ix_liquidate():
     path=join(BASE_PATH_TRANSFORMED, TRANSACTIONS_TABLE, "cleaned-ix-trade"),
 )
 def cleaned_ix_trade():
-    markets_df = dlt.read("cleaned_markets")
+    markets_df = spark.table("zetadex_mainnet_tx.cleaned_markets")
     df = (
         dlt.read_stream("cleaned_transactions")
         .withWatermark("block_time", "1 minute")
@@ -494,7 +460,7 @@ def cleaned_ix_trade():
         )
     )
     maker_df = (
-        df.filter("instruction.name == 'crank_event_queue'")
+        df.filter(F.col("instruction.name").startswith("crank_event_queue"))
         .withColumn("event", F.explode("instruction.events"))
         .filter(F.col("event.name").startswith("trade_event"))
         .withColumn("maker_taker", F.lit("maker"))
@@ -504,6 +470,7 @@ def cleaned_ix_trade():
         .filter(
             (F.array_contains("instruction.events.name", F.lit("trade_event")))
             | (F.array_contains("instruction.events.name", F.lit("trade_event_v2")))
+            | (F.array_contains("instruction.events.name", F.lit("trade_event_v3")))
         )  # filter to only taker orders that trade
         .withColumn("event", place_trade_event_merge("instruction.events"))
         .withColumn("maker_taker", F.lit("taker"))
@@ -519,7 +486,7 @@ def cleaned_ix_trade():
         .select(
             "signature",
             "instruction_index",
-            F.coalesce("asset", "event.event.asset").alias("asset"),
+            F.coalesce("asset", F.upper("event.event.asset")).alias("asset"),
             "event.name",
             F.col("event.event.user").alias("authority"),
             "event.event.margin_account",
@@ -693,7 +660,7 @@ def agg_funding_rate_user_asset_1h():
         .withWatermark("block_time", "1 minute")
         .withColumn("instruction", F.explode("instructions"))
         .withColumn("event", F.explode("instruction.events"))
-        .filter("event.name == 'apply_funding_event'")
+        .filter(F.col("event.name").startswith('apply_funding_event'))
         .groupBy(
             F.col("event.event.user").alias("authority"),
             F.upper("event.event.asset").alias("asset"),
@@ -775,10 +742,10 @@ def cleaned_pnl():
             deposits_df.alias("d"),
             F.expr(
                 """
-               p.asset = d.asset AND
-               p.authority = d.authority AND
-               p.timestamp = d.timestamp
-               """
+                p.asset = d.asset AND
+                p.authority = d.authority AND
+                p.timestamp = d.timestamp + interval 1 hour
+                """
             ),
             how="left",
         )
@@ -786,10 +753,10 @@ def cleaned_pnl():
             withdrawals_df.alias("w"),
             F.expr(
                 """
-               p.asset = w.asset AND
-               p.authority = w.authority AND
-               p.timestamp = d.timestamp
-               """
+                p.asset = w.asset AND
+                p.authority = w.authority AND
+                p.timestamp = w.timestamp + interval 1 hour
+                """
             ),
             how="left",
         )

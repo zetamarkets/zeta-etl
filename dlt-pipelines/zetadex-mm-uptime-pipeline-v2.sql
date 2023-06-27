@@ -19,8 +19,8 @@ from
   and a.order_id = b.order_id
   inner join zetadex_mainnet.pubkey_label l on a.authority = l.pub_key
 where
-  --date(a.block_time) = current_date() - interval 2 days
-  date(a.block_time) between date('2023-04-03') and (current_date() - interval 2 days)
+  --date(a.block_time) between date('2023-05-13') and (current_date() - interval 2 days)
+  date(a.block_time) = current_date() - interval 2 days
   and b.block_time > a.block_time
   and l.pub_key in (
      '9xLcZBGBcVQEiEb2cDLCKY5pke5RkqXTLguvFztioCT',
@@ -137,13 +137,12 @@ select
       least(end_quote, end_interval)
     )
   ) * q.ask_price as size_weighted_ask_price
-from
-  intervals t
-  join quotes q on date(t.start_interval) = date(q.start_quote)
-  and t.label = q.label
-  and t.asset = q.asset
-  and t.start_interval < q.end_quote
-  and t.end_interval > q.start_quote -- range join
+from intervals t
+  inner join quotes q on date(t.start_interval) = date(q.start_quote)
+    and t.label = q.label
+    and t.asset = q.asset
+    and t.start_interval < q.end_quote
+    and t.end_interval > q.start_quote -- range join
 
 -- COMMAND ----------
 
@@ -175,12 +174,7 @@ select
   end as quote_meets_spread_criteria
 from
   intervals_2 a
-group by
-  1,
-  2,
-  3,
-  4,
-  5
+group by 1,2,3,4,5
 
 -- COMMAND ----------
 
@@ -188,7 +182,8 @@ CREATE
 OR REPLACE TEMPORARY VIEW uptime_agg as
 
 with
-hours as (select explode(sequence(timestamp('2023-04-03'),timestamp(dateadd(current_date(),-2)),interval 1 hour)) as hour)
+--hours as (select explode(sequence(timestamp('2023-05-13'),timestamp(dateadd(current_date(),-2)),interval 1 hour)) as hour)
+hours as (select explode(sequence(timestamp(dateadd(current_date(),-2)),timestamp(dateadd(current_date(),-1)),interval 1 hour)) as hour)
 
 , base as (
 	select
@@ -197,6 +192,9 @@ hours as (select explode(sequence(timestamp('2023-04-03'),timestamp(dateadd(curr
 		, m.asset
 	from hours h
 		cross join (select distinct m.label, m.asset from zetadex_mainnet.cleaned_mm_uptime m) m
+  where
+    --date(h.hour) < dateadd(current_date(),-2)
+    date(h.hour) = dateadd(current_date(),-2)
 )
 
 , uptime as (
@@ -204,7 +202,7 @@ hours as (select explode(sequence(timestamp('2023-04-03'),timestamp(dateadd(curr
 		m.label
 		, date_trunc('hour', m.start_quote_interval) as timestamp
 		, m.asset
-		, count(*) as quote_count
+		, sum(m.quotes) as quote_count
 		, median(m.quote_duration_interval) as median_quote_length
 		, median(m.total_ask_size_usd) as median_total_ask_size_usd
 		, median(m.total_bid_size_usd) as median_total_bid_size_usd
@@ -216,7 +214,7 @@ hours as (select explode(sequence(timestamp('2023-04-03'),timestamp(dateadd(curr
 		, sum(case when m.quote_meets_size_criteria then m.quote_duration_interval end) / sum(m.quote_duration_interval) as meet_size_rate
 		, sum(case when m.quote_meets_size_criteria and m.quote_meets_spread_criteria then m.quote_duration_interval end) as seconds_meeting_uptime
 		, sum(case when m.quote_meets_size_criteria and m.quote_meets_spread_criteria then m.quote_duration_interval end) / 3600 as uptime_rate
-	from zetadex_mainnet.cleaned_mm_uptime m
+	from uptime m
 	group by 1,2,3
 )
 
@@ -244,22 +242,12 @@ from base b
 -- COMMAND ----------
 
 -- MAGIC %python
--- MAGIC df = spark.table("uptime")
+-- MAGIC df = spark.table("uptime_agg")
 
 -- COMMAND ----------
 
 -- MAGIC %python
--- MAGIC df.write.format("delta").mode("append").saveAsTable("zetadex_mainnet.cleaned_mm_uptime")
-
--- COMMAND ----------
-
---%sql select * from zetadex_mainnet.cleaned_mm_uptime
-DROP TABLE IF EXISTS zetadex_mainnet.cleaned_mm_uptime
-
--- COMMAND ----------
-
--- MAGIC %sql
--- MAGIC select dateadd(current_date(),-2)
+-- MAGIC df.write.format("delta").mode("append").saveAsTable("zetadex_mainnet.cleaned_mm_uptime_agg")
 
 -- COMMAND ----------
 

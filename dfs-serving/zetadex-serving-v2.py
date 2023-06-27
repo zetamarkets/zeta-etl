@@ -20,7 +20,7 @@ class ServingClient:
         self.region = region
         self.dynamodb = boto3.resource('dynamodb', region_name=region)
 
-    def create_dynamodb_table(self, table_name, primary_key, sort_key, local_secondary_indexes=None, global_secondary_indexes=None):
+    def create_dynamodb_table(self, table_name, primary_key, sort_key=None, local_secondary_indexes=None, global_secondary_indexes=None):
         '''
         table_name = 'YourTableName'
         primary_key = {'name': 'id', 'type': 'N'}
@@ -51,10 +51,6 @@ class ServingClient:
             {
                 'AttributeName': primary_key['name'],
                 'AttributeType': primary_key['type']
-            },
-            {
-                'AttributeName': sort_key['name'],
-                'AttributeType': sort_key['type']
             }
         ]
 
@@ -62,12 +58,18 @@ class ServingClient:
             {
                 'AttributeName': primary_key['name'],
                 'KeyType': 'HASH'
-            },
-            {
-                'AttributeName': sort_key['name'],
-                'KeyType': 'RANGE'
             }
         ]
+
+        if sort_key:
+            attribute_definitions.append({
+                'AttributeName': sort_key['name'],
+                'AttributeType': sort_key['type']
+            })
+            key_schema.append({
+                'AttributeName': sort_key['name'],
+                'KeyType': 'RANGE'
+            })
 
         if local_secondary_indexes:
             for index in local_secondary_indexes:
@@ -149,13 +151,19 @@ class ServingClient:
         except self.dynamodb.meta.client.exceptions.ResourceNotFoundException:
             return False
 
-    def serve_table(self, table_name, primary_key, sort_key, df: DataFrame, mode='append'):
+    def serve_table(self, table_name, df: DataFrame, primary_key, sort_key=None, mode='append', batch_size=25, throughput=100, update=False):
         if not self.check_table_exists(table_name):
-            table = self.create_dynamodb_table(table_name, primary_key, sort_key)
+            if sort_key:
+                table = self.create_dynamodb_table(table_name, primary_key, sort_key)
+            else:
+                table = self.create_dynamodb_table(table_name, primary_key)
         
         print(f"Writing {df.count()} rows to {table_name}")
         df.write.option("tableName", table_name) \
               .option('region', self.region) \
+              .option('writeBatchSize', batch_size) \
+              .option('update', update) \
+              .option('throughput', throughput) \
               .mode(mode) \
               .format("dynamodb") \
               .save()
@@ -164,7 +172,7 @@ class ServingClient:
 
 # MAGIC %md
 # MAGIC # Serving Routines
-# MAGIC 
+# MAGIC
 # MAGIC ## User stats
 # MAGIC * Funding [margin_account (or asset?), timestamp] (agg_funding_rate_1h)
 # MAGIC   * asset|margin_account (P)
@@ -188,7 +196,7 @@ class ServingClient:
 # MAGIC   * pnl_diff_24h_rank
 # MAGIC   * pnl_diff_7d_rank
 # MAGIC   * pnl_diff_30d_rank
-# MAGIC 
+# MAGIC
 # MAGIC ## Platform stats
 # MAGIC * Rolling 24hr stats [asset|ALL, timestamp] (agg_ix_trade_1h)
 # MAGIC   * asset|ALL (P)
@@ -204,7 +212,7 @@ class ServingClient:
 # MAGIC   * volume
 # MAGIC   <!-- * tvl -->
 # MAGIC * Flex TVL?
-# MAGIC 
+# MAGIC
 # MAGIC ## Rewards
 # MAGIC * Maker rewards (agg_maker_rewards_epoch_user)
 # MAGIC   * authority (P)
@@ -260,24 +268,24 @@ client = ServingClient()
 
 # DBTITLE 1,Funding
 table_name = "zetadex_mainnet_tx.agg_funding_rate_user_asset_1h"
-primary_key = {"name": "asset", "type": "S"}
+primary_key = {"name": "margin_account", "type": "S"}
 sort_key = {"name": "timestamp", "type": "N"}
 
-# TODO: filter to only serve current hour, not sure what happens if same data is written...
-df = spark.table(table_name).limit(10)
+df = spark.table(table_name) \
+    .filter("timestamp == date_trunc('hour', current_timestamp - interval 1 hour)") # getting last hour funding because current hour funding is incomplete
 
-client.serve_table(table_name, primary_key, sort_key, df)
+client.serve_table(table_name, df, primary_key, sort_key)
 
 # COMMAND ----------
 
 # DBTITLE 1,PnL
 table_name = "zetadex_mainnet_tx.agg_pnl"
 primary_key = {"name": "authority", "type": "S"}
-sort_key = {"name": "timestamp", "type": "N"}
+# sort_key = {"name": "timestamp", "type": "N"}
+df = spark.table(table_name) \
+    .filter("timestamp == date_trunc('hour', current_timestamp)")
 
-df = spark.table(table_name).limit(10)
-
-client.serve_table(table_name, primary_key, sort_key, df)
+client.serve_table(table_name, df, primary_key, update=True, throughput=1000)
 
 # COMMAND ----------
 
@@ -286,9 +294,11 @@ table_name = "zetadex_mainnet_tx.agg_ix_trade_24h_rolling"
 primary_key = {"name": "asset", "type": "S"}
 sort_key = {"name": "timestamp", "type": "N"}
 
-df = spark.table(table_name).withColumn("asset", F.lit("ALL")).limit(10)
+df = spark.table(table_name) \
+    .withColumn("asset", F.lit("ALL")) \
+    .filter("timestamp == date_trunc('hour', current_timestamp - interval 1 hour)")
 
-client.serve_table(table_name, primary_key, sort_key, df)
+client.serve_table(table_name, df, primary_key, sort_key)
 
 # COMMAND ----------
 
@@ -297,9 +307,11 @@ table_name = "zetadex_mainnet_tx.agg_ix_trade_1h"
 primary_key = {"name": "asset", "type": "S"}
 sort_key = {"name": "timestamp", "type": "N"}
 
-df = spark.table(table_name).withColumn("asset", F.lit("ALL")).limit(10)
+df = spark.table(table_name) \
+    .withColumn("asset", F.lit("ALL")) \
+    .filter("timestamp == date_trunc('hour', current_timestamp - interval 1 hour)")
 
-client.serve_table(table_name, primary_key, sort_key, df)
+client.serve_table(table_name, df, primary_key, sort_key)
 
 # COMMAND ----------
 
@@ -308,9 +320,9 @@ table_name = "zetadex_mainnet_rewards.agg_maker_rewards_epoch_user"
 primary_key = {"name": "authority", "type": "S"}
 sort_key = {"name": "epoch", "type": "N"}
 
-df = spark.table(table_name).limit(10)
+df = spark.table(table_name) \
 
-client.serve_table(table_name, primary_key, sort_key, df)
+client.serve_table(table_name, df, primary_key, sort_key)
 
 # COMMAND ----------
 
@@ -319,9 +331,9 @@ table_name = "zetadex_mainnet_rewards.agg_taker_rewards_epoch_user"
 primary_key = {"name": "authority", "type": "S"}
 sort_key = {"name": "epoch", "type": "N"}
 
-df = spark.table(table_name).limit(10)
+df = spark.table(table_name) \
 
-client.serve_table(table_name, primary_key, sort_key, df)
+client.serve_table(table_name, df, primary_key, sort_key)
 
 # COMMAND ----------
 
@@ -330,9 +342,9 @@ table_name = "zetadex_mainnet_rewards.agg_referrer_rewards_epoch_user"
 primary_key = {"name": "referrer", "type": "S"}
 sort_key = {"name": "epoch", "type": "N"}
 
-df = spark.table(table_name).limit(10)
+df = spark.table(table_name)
 
-client.serve_table(table_name, primary_key, sort_key, df)
+client.serve_table(table_name, df, primary_key, sort_key)
 
 # COMMAND ----------
 
@@ -341,9 +353,9 @@ table_name = "zetadex_mainnet_rewards.agg_referee_rewards_epoch_user"
 primary_key = {"name": "referee", "type": "S"}
 sort_key = {"name": "epoch", "type": "N"}
 
-df = spark.table(table_name).limit(10)
+df = spark.table(table_name)
 
-client.serve_table(table_name, primary_key, sort_key, df)
+client.serve_table(table_name, df, primary_key, sort_key)
 
 # COMMAND ----------
 
