@@ -52,26 +52,26 @@ day string,
 hour string
 """
 
+
 @dlt.table(
     comment="Raw data for referrers",
     table_properties={
-        "quality":"bronze", 
+        "quality": "bronze",
     },
-    path=join(BASE_PATH_TRANSFORMED,REFERRERS_TABLE,"raw"),
-    schema=referrers_schema
+    path=join(BASE_PATH_TRANSFORMED, REFERRERS_TABLE, "raw"),
+    schema=referrers_schema,
 )
 def raw_referrers():
-    return (spark
-           .readStream
-           .format("cloudFiles")
-           .option("cloudFiles.format", "json")
-           .option("cloudFiles.region", "ap-southeast-1")
-           .option("cloudFiles.includeExistingFiles", True)
-           .option("cloudFiles.useNotifications", True)
-           .option("partitionColumns", "year,month,day,hour")
-           .schema(referrers_schema)
-           .load(join(BASE_PATH_LANDED,REFERRERS_TABLE,"data"))
-          )
+    return (
+        spark.readStream.format("cloudFiles")
+        .option("cloudFiles.format", "json")
+        .option("cloudFiles.region", "ap-southeast-1")
+        .option("cloudFiles.includeExistingFiles", True)
+        .option("cloudFiles.useNotifications", True)
+        .option("partitionColumns", "year,month,day,hour")
+        .schema(referrers_schema)
+        .load(join(BASE_PATH_LANDED, REFERRERS_TABLE, "data"))
+    )
 
 # COMMAND ----------
 
@@ -91,43 +91,47 @@ day string,
 hour string
 """
 
+
 @dlt.table(
     comment="Raw data for referrals",
     table_properties={
-        "quality":"bronze", 
+        "quality": "bronze",
     },
-    path=join(BASE_PATH_TRANSFORMED,REFERRALS_TABLE,"raw"),
-    schema=referrals_schema
+    path=join(BASE_PATH_TRANSFORMED, REFERRALS_TABLE, "raw"),
+    schema=referrals_schema,
 )
 def raw_referrals():
-    return (spark
-           .readStream
-           .format("cloudFiles")
-           .option("cloudFiles.format", "json")
-           .option("cloudFiles.region", "ap-southeast-1")
-           .option("cloudFiles.includeExistingFiles", True)
-           .option("cloudFiles.useNotifications", True)
-           .option("partitionColumns", "year,month,day,hour")
-           .schema(referrals_schema)
-           .load(join(BASE_PATH_LANDED,REFERRALS_TABLE,"data"))
-          )
+    return (
+        spark.readStream.format("cloudFiles")
+        .option("cloudFiles.format", "json")
+        .option("cloudFiles.region", "ap-southeast-1")
+        .option("cloudFiles.includeExistingFiles", True)
+        .option("cloudFiles.useNotifications", True)
+        .option("partitionColumns", "year,month,day,hour")
+        .schema(referrals_schema)
+        .load(join(BASE_PATH_LANDED, REFERRALS_TABLE, "data"))
+    )
 
 # COMMAND ----------
 
 @dlt.view()
 def raw_referrals_v():
-    referrals_df = (dlt.read_stream("raw_referrals")
-                       .withWatermark("indexed_timestamp", "1 hour"))
-    return (dlt.read_stream("raw_referrers")
-            .withWatermark("indexed_timestamp", "1 hour")
-#            .dropDuplicates(["underlying", "expiry_timestamp", "slot"])
-           .join(referrals_df,
-                on=["indexed_timestamp", "referrer"],
-                how="inner")
-           .select("referrer", "alias", "referral", "timestamp", "raw_referrers.indexed_timestamp")
-           .withColumn("date_", F.to_date("indexed_timestamp"))
-           .withColumn("hour_", F.date_format("indexed_timestamp", "HH").cast("int"))
-          )
+    referrals_df = (
+        dlt.read_stream("raw_referrals")
+        .withColumn("indexed_timestamp", F.date_trunc("hour", "indexed_timestamp"))
+        .withWatermark("indexed_timestamp", "1 hour")
+    )
+    return (
+        dlt.read_stream("raw_referrers")
+        .withColumn("indexed_timestamp", F.date_trunc("hour", "indexed_timestamp"))
+        .alias("referrers")
+        .join(referrals_df, on=["indexed_timestamp", "referrer"], how="inner")
+        .select(
+            "referrer", "alias", "referral", "timestamp", "referrers.indexed_timestamp"
+        )
+        .withColumn("date_", F.to_date("indexed_timestamp"))
+        .withColumn("hour_", F.date_format("indexed_timestamp", "HH").cast("int"))
+    )
 
 # COMMAND ----------
 
@@ -137,12 +141,12 @@ dlt.create_streaming_live_table(
     table_properties={
         "quality": "silver",
         # "delta.enableChangeDataFeed" = "true"
-    }
+    },
 )
 
 dlt.apply_changes(
-    target = "cleaned_referrals", 
-    source = "raw_referrals_v", 
-    keys = ["referrer","referral"], 
-    sequence_by = "indexed_timestamp"
+    target="cleaned_referrals",
+    source="raw_referrals_v",
+    keys=["referrer", "referral"],
+    sequence_by="indexed_timestamp",
 )

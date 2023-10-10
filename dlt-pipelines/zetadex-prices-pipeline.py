@@ -105,9 +105,9 @@ delta double,
 vega double,
 sigma double,
 open_interest double,
-perp_latest_midpoint double,
-perp_funding_delta double,
-perp_latest_funding_rate double,
+latest_midpoint double,
+funding_delta double,
+latest_funding_rate double,
 slot long,
 year string,
 month string,
@@ -151,19 +151,20 @@ def raw_prices():
 def cleaned_prices():
     prices_df = (
         dlt.read("cleaned_coingecko_prices")
-        .withColumn("date_hour", F.date_trunc("hour", "timestamp"))
-        .withWatermark("date_hour", "1 hour")
-    )
+        .withColumn("timestamp", F.date_trunc("hour", "timestamp"))
+        .withWatermark("timestamp", "1 hour")
+    ).alias("cg")
     return (
         dlt.read_stream("raw_prices")
         .withWatermark("timestamp", "1 minute")
-        .withColumn("open_interest_usd", F.col("open_interest") * F.col("theo"))
+        .withColumn("timestamp", F.date_trunc("hour", "timestamp"))
+        .alias("p")
         .join(
             prices_df,
             F.expr(
                 """
-            raw_prices.underlying = cleaned_coingecko_prices.underlying AND
-            raw_prices.timestamp >= date_hour and raw_prices.timestamp < date_hour + interval 1 hour
+            p.underlying = cg.underlying AND
+            p.timestamp = cg.timestamp
             """
             ),
             how="left",
@@ -172,24 +173,11 @@ def cleaned_prices():
             "open_interest_notional", F.col("open_interest") * F.col("price_usd")
         )
         .select(
-            "raw_prices.timestamp",
-            "raw_prices.underlying",
-            "expiry_timestamp",
-            "strike",
-            "kind",
-            "market_index",
-            "theo",
-            "delta",
-            "vega",
-            "sigma",
+            "p.timestamp",
+            F.col("p.underlying").alias("asset"),
             "open_interest",
-            "open_interest_usd",
             "price_usd",
             "open_interest_notional",
-            "perp_latest_midpoint",
-            "perp_funding_delta",
-            "perp_latest_funding_rate",
-            "slot",
         )
         .withColumn("date_", F.to_date("timestamp"))
         .withColumn("hour_", F.date_format("timestamp", "HH").cast("int"))
@@ -198,47 +186,46 @@ def cleaned_prices():
 # COMMAND ----------
 
 # DBTITLE 1,Gold
-@dlt.table(
-    comment="Market-hourly aggregated data for prices, greeks",
-    table_properties={
-        "quality": "gold",
-        "pipelines.autoOptimize.zOrderCols": "timestamp",
-    },
-    partition_cols=["date_"],
-    path=join(BASE_PATH_TRANSFORMED, PRICES_TABLE, "agg-m1h"),
-)
-def agg_prices_market_1h():
-    return (
-        dlt.read_stream("cleaned_prices")
-        .withWatermark("timestamp", "1 hour")
-        .groupBy(
-            F.window("timestamp", "1 hour").alias("timestamp_window"),
-            "underlying",
-            "expiry_timestamp",
-            "strike",
-            "kind",
-        )
-        .agg(
-            F.first("theo", ignorenulls=True).alias("theo"),
-            F.first("delta", ignorenulls=True).alias("delta"),
-            F.first("vega", ignorenulls=True).alias("vega"),
-            F.first("sigma", ignorenulls=True).alias("sigma"),
-            F.first("open_interest", ignorenulls=True).alias("open_interest"),
-            F.first("open_interest_usd", ignorenulls=True).alias("open_interest_usd"),
-        )
-        .withColumn(
-            "date_",
-            F.to_date(F.col("timestamp_window.end") - F.expr("INTERVAL 1 HOUR")),
-        )
-        .withColumn(
-            "hour_",
-            F.date_format(
-                F.col("timestamp_window.end") - F.expr("INTERVAL 1 HOUR"), "HH"
-            ).cast("int"),
-        )
-        .withColumn("timestamp", F.col("timestamp_window.end"))
-    )
-
+# @dlt.table(
+#     comment="Market-hourly aggregated data for prices, greeks",
+#     table_properties={
+#         "quality": "gold",
+#         "pipelines.autoOptimize.zOrderCols": "timestamp",
+#     },
+#     partition_cols=["date_"],
+#     path=join(BASE_PATH_TRANSFORMED, PRICES_TABLE, "agg-m1h"),
+# )
+# def agg_prices_market_1h():
+#     return (
+#         dlt.read_stream("cleaned_prices")
+#         .withWatermark("timestamp", "1 hour")
+#         .groupBy(
+#             F.window("timestamp", "1 hour").alias("timestamp_window"),
+#             "underlying",
+#             "expiry_timestamp",
+#             "strike",
+#             "kind",
+#         )
+#         .agg(
+#             F.first("theo", ignorenulls=True).alias("theo"),
+#             F.first("delta", ignorenulls=True).alias("delta"),
+#             F.first("vega", ignorenulls=True).alias("vega"),
+#             F.first("sigma", ignorenulls=True).alias("sigma"),
+#             F.first("open_interest", ignorenulls=True).alias("open_interest"),
+#             F.first("open_interest_usd", ignorenulls=True).alias("open_interest_usd"),
+#         )
+#         .withColumn(
+#             "date_",
+#             F.to_date(F.col("timestamp_window.end") - F.expr("INTERVAL 1 HOUR")),
+#         )
+#         .withColumn(
+#             "hour_",
+#             F.date_format(
+#                 F.col("timestamp_window.end") - F.expr("INTERVAL 1 HOUR"), "HH"
+#             ).cast("int"),
+#         )
+#         .withColumn("timestamp", F.col("timestamp_window.end"))
+#     )
 
 # COMMAND ----------
 

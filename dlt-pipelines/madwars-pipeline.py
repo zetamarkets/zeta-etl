@@ -15,7 +15,7 @@ import dlt
 days = lambda i: i * 86400
 hours = lambda i: i * 3600
 
-COMPETITION_START_DATE = "2023-07-01 00:00"
+COMPETITION_START_TIME = "2023-07-13 15:00"
 
 # COMMAND ----------
 
@@ -100,7 +100,7 @@ def teams():
 def volume():
     return (
         spark.table("zetadex_mainnet_tx.cleaned_ix_trade")
-        .filter(f"block_time >= '{COMPETITION_START_DATE}'")
+        .filter(f"block_time >= '{COMPETITION_START_TIME}'")
         .groupBy("authority")
         .agg(F.sum("volume").alias("volume"))
     )
@@ -135,38 +135,48 @@ def pnl_individual():
         )
     )
 
-    windowSpecRatioRank = Window.partitionBy("timestamp").orderBy(
-        F.desc("roi"),
-        F.desc("pnl"),
-        "authority",  # "margin_account"
-    )
-    windowSpecDiffRank = Window.partitionBy("timestamp").orderBy(
+    windowSpecPnlRank = Window.partitionBy("timestamp").orderBy(
         F.desc("pnl"),
         F.desc("roi"),
         "authority",  # "margin_account"
     )
-
-    windowSpecRatioRankTeam = Window.partitionBy("timestamp", "team").orderBy(
+    windowSpecRoiRank = Window.partitionBy("timestamp").orderBy(
         F.desc("roi"),
         F.desc("pnl"),
         "authority",  # "margin_account"
     )
-    windowSpecDiffRankTeam = Window.partitionBy("timestamp", "team").orderBy(
-        F.desc("pnl"),
-        F.desc("roi"),
+    windowSpecVolumeRank = Window.partitionBy("timestamp").orderBy(
+        F.desc("volume"),
         "authority",  # "margin_account"
     )
 
-    teams_df = dlt.read("teams")
+    windowSpecPnlRankTeam = Window.partitionBy("timestamp", "team").orderBy(
+        F.desc("pnl"),
+        F.desc("roi"),
+        "authority",  # "margin_account"
+    )
+    windowSpecRoiRankTeam = Window.partitionBy("timestamp", "team").orderBy(
+        F.desc("roi"),
+        F.desc("pnl"),
+        "authority",  # "margin_account"
+    )
+    windowSpecVolumeRankTeam = Window.partitionBy("timestamp", "team").orderBy(
+        F.desc("volume"),
+        "authority",  # "margin_account"
+    )
+
+    teams_df = spark.table("madwars.team_snapshot")#dlt.read("teams")
     volume_df = dlt.read("volume")
+    pnl_df = spark.table("zetadex_mainnet_tx.cleaned_pnl")
     return (
-        # dlt.read("cleaned_pnl")
-        spark.table("zetadex_mainnet_tx.cleaned_pnl")
-        # .withWatermark("timestamp", "10 minutes")
+        teams_df
+        .join(pnl_df, on="authority", how="left")
         .filter(
-            f"timestamp >= '{COMPETITION_START_DATE}'"  # max pnl lookback aggregation
+            f"timestamp >= '{COMPETITION_START_TIME}'"  # max pnl lookback aggregation
         )
-        .join(teams_df, on="authority", how="inner")
+        .withColumn("equity", F.coalesce("equity", F.lit(0)))
+        .withColumn("cumulative_pnl", F.coalesce("cumulative_pnl", F.lit(0)))
+        .withColumn("deposit_amount", F.coalesce("deposit_amount", F.lit(0)))
         .join(volume_df, on="authority", how="left")
         .withColumn("volume", F.coalesce("volume", F.lit(0)))
         .withColumn("cumulative_pnl_lag", F.first("cumulative_pnl").over(windowSpec))
@@ -179,7 +189,7 @@ def pnl_individual():
             )
             / (
                 F.unix_timestamp(F.date_trunc("hour", F.current_timestamp()))
-                - F.unix_timestamp(F.to_timestamp(F.lit(COMPETITION_START_DATE)))
+                - F.unix_timestamp(F.to_timestamp(F.lit(COMPETITION_START_TIME)))
             ),
         )
         .withColumn(
@@ -200,13 +210,14 @@ def pnl_individual():
             ),
         )
         # ranks
-        .withColumn("pnl_rank_global", F.rank().over(windowSpecDiffRank))
-        .withColumn("roi_rank_global", F.rank().over(windowSpecRatioRank))
-        .withColumn("pnl_rank_team", F.rank().over(windowSpecDiffRankTeam))
-        .withColumn("roi_rank_team", F.rank().over(windowSpecRatioRankTeam))
+        .withColumn("pnl_rank_global", F.rank().over(windowSpecPnlRank))
+        .withColumn("roi_rank_global", F.rank().over(windowSpecRoiRank))
+        .withColumn("volume_rank_global", F.rank().over(windowSpecVolumeRank))
+        .withColumn("pnl_rank_team", F.rank().over(windowSpecPnlRankTeam))
+        .withColumn("roi_rank_team", F.rank().over(windowSpecRoiRankTeam))
+        .withColumn("volume_rank_team", F.rank().over(windowSpecVolumeRankTeam))
         .filter("timestamp == date_trunc('hour',  current_timestamp)")
     )
-
 
 # individual_pnl_df = pnl_individual()
 
@@ -235,67 +246,48 @@ def pnl_team():
         .rowsBetween(Window.unboundedPreceding + 1, 0)
     )
 
-    windowSpecRatioRank = Window.partitionBy("timestamp").orderBy(
+    windowSpecPnlRank = Window.partitionBy("timestamp").orderBy(
+        F.desc("pnl"),
+        F.desc("roi"),
+        "team",
+    )
+    windowSpecRoiRank = Window.partitionBy("timestamp").orderBy(
         F.desc("roi"),
         F.desc("pnl"),
         "team",
     )
-    windowSpecDiffRank = Window.partitionBy("timestamp").orderBy(
-        F.desc("pnl"),
-        F.desc("roi"),
+    windowSpecVolumeRank = Window.partitionBy("timestamp").orderBy(
+        F.desc("volume"),
         "team",
     )
 
-    teams_df = dlt.read("teams")
-    volume_df = dlt.read("volume")
+    individual_pnl_df = dlt.read("pnl_individual")
     return (
-        # dlt.read("cleaned_pnl")
-        spark.table("zetadex_mainnet_tx.cleaned_pnl")
-        .withWatermark("timestamp", "10 minutes")
-        .filter(
-            f"timestamp >= '{COMPETITION_START_DATE}'"  # max pnl lookback aggregation
-        )
-        .join(teams_df, on="authority", how="inner")
-        .join(volume_df, on="authority", how="left")
-        .withColumn("volume", F.coalesce("volume", F.lit(0)))
+        individual_pnl_df
+        .filter("team != 'No Team'")
         .groupBy("timestamp", "team")
         .agg(
             F.sum("cumulative_pnl").alias("cumulative_pnl"),
             F.sum("equity").alias("equity"),
-            F.sum("deposit_amount").alias("deposit_amount"),
+            F.sum("equity_lag").alias("equity_lag"),
+            F.sum("pnl").alias("pnl"),
+            F.sum("deposit_amount_weighted").alias("deposit_amount_weighted"),
             F.sum("volume").alias("volume"),
         )
-        .withColumn("cumulative_pnl_lag", F.first("cumulative_pnl").over(windowSpec))
-        .withColumn("equity_lag", F.first("equity").over(windowSpec))
-        .withColumn(
-            "w",
-            (
-                F.unix_timestamp(F.date_trunc("hour", F.current_timestamp()))
-                - F.unix_timestamp(F.col("timestamp"))
-            )
-            / (
-                F.unix_timestamp(F.date_trunc("hour", F.current_timestamp()))
-                - F.unix_timestamp(F.to_timestamp(F.lit(COMPETITION_START_DATE)))
-            ),
-        )
-        .withColumn(
-            "deposit_amount_weighted",
-            F.sum(F.col("deposit_amount") * F.col("w")).over(windowSpecExclusive),
-        )
-        .drop("w")
+        .filter("volume > 0") # filter out zero volume teams
         # PnL and ROI
-        .withColumn("pnl", F.col("cumulative_pnl") - F.col("cumulative_pnl_lag"))
         .withColumn(
-            "roi",  # "roi_modified_dietz",
+            "roi",
             F.when(F.col("pnl") == 0, F.lit(0)).otherwise(
                 F.col("pnl")
                 / (100 + F.col("equity_lag") + F.col("deposit_amount_weighted"))
             ),
         )
         # ranks
-        .withColumn("pnl_rank", F.rank().over(windowSpecDiffRank))
-        .withColumn("roi_rank", F.rank().over(windowSpecRatioRank))
-        .filter("timestamp == date_trunc('hour',  current_timestamp - interval 1 hour)")
+        .withColumn("pnl_rank", F.rank().over(windowSpecPnlRank))
+        .withColumn("roi_rank", F.rank().over(windowSpecRoiRank))
+        .withColumn("volume_rank", F.rank().over(windowSpecRoiRank))
+        # .filter("timestamp == date_trunc('hour',  current_timestamp)")
     )
 
 

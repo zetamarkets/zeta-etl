@@ -333,12 +333,12 @@ client = ServingClient()
 
 # DBTITLE 1,Funding
 table_name = "zetadex_mainnet_tx.agg_funding_rate_user_asset_1h"
-primary_key = {"name": "marginAccount", "type": "S"}
+primary_key = {"name": "margin_account", "type": "S"}
 sort_key = {"name": "timestamp#asset", "type": "S"}  # composite sort key
 
 local_secondary_indexes = [
     {
-        "index_name": "marginAccount-timestamp-index",
+        "index_name": "margin_account-timestamp-index",
         "sort_key": {"name": "timestamp", "type": "N"},
         "projection_type": "ALL",
     }
@@ -354,222 +354,96 @@ df = (
     )
 )  # composite sort key
 
-# Rename columns to camelCase
-for col in df.columns:
-    df = df.withColumnRenamed(col, to_camel_case(col))
-
-client.serve_table(table_name+"_v2", df, primary_key, sort_key, local_secondary_indexes=local_secondary_indexes)
+client.serve_table(table_name, df, primary_key, sort_key, local_secondary_indexes=local_secondary_indexes)
 
 # COMMAND ----------
 
 # DBTITLE 1,PnL
-table_name = "zetadex_mainnet_tx.agg_pnl"
-primary_key = {"name": "marginAccount", "type": "S"}
+# table_name = "zetadex_mainnet_tx.agg_pnl"
+# primary_key = {"name": "authority", "type": "S"}
+# # sort_key = {"name": "timestamp", "type": "N"}
 
-df = (
-    spark.table(table_name)
-    .filter("date_ == current_date")
-    .filter("timestamp == date_trunc('hour', current_timestamp)")
-    .select(
-        "timestamp",
-        "authority",
-        "margin_account",
-        "balance",
-        "unrealized_pnl",
-        "equity",
-        "cumulative_pnl",
-        "pnl_24h",
-        "pnl_7d",
-        "pnl_30d",
-        "roi_24h",
-        "roi_7d",
-        "roi_30d",
-        "pnl_24h_rank",
-        "pnl_7d_rank",
-        "pnl_30d_rank",
-        "roi_24h_rank",
-        "roi_7d_rank",
-        "roi_30d_rank",
-        "pnl_24h_rank_change",
-        "pnl_7d_rank_change",
-        "pnl_30d_rank_change",
-        "roi_24h_rank_change",
-        "roi_7d_rank_change",
-        "roi_30d_rank_change",
-    )
-)
+# global_secondary_indexes = []
+# for time_period in ["24h", "7d", "30d"]:
+#     global_secondary_indexes.extend(
+#         [
+#             {
+#                 "index_name": f"pnl_{time_period}_rank-index",
+#                 "hash_key": {"name": f"pnl_{time_period}_rank", "type": "N"},
+#                 "projection_type": "INCLUDE",
+#                 "non_key_attributes": [
+#                     "timestamp",
+#                     "cumulative_pnl",
+#                     f"pnl_{time_period}",
+#                 ],
+#             },
+#             {
+#                 "index_name": f"roi_{time_period}_rank-index",
+#                 "hash_key": {"name": f"roi_{time_period}_rank", "type": "N"},
+#                 "projection_type": "INCLUDE",
+#                 "non_key_attributes": [
+#                     "timestamp",
+#                     "cumulative_pnl",
+#                     f"roi_{time_period}",
+#                 ],
+#             },
+#         ]
+#     )
 
-# Rename columns to camelCase
-for col in df.columns:
-    df = df.withColumnRenamed(col, to_camel_case(col))
+# df = (
+#     spark.table(table_name)
+#     .filter("date_ == current_date")
+#     .filter("timestamp == date_trunc('hour', current_timestamp)")
+#     .select(
+#         "timestamp",
+#         "authority",
+#         "margin_account",
+#         "balance",
+#         "unrealized_pnl",
+#         "equity",
+#         "cumulative_pnl",
+#         "pnl_24h",
+#         "pnl_7d",
+#         "pnl_30d",
+#         "roi_24h",
+#         "roi_7d",
+#         "roi_30d",
+#         "pnl_24h_rank",
+#         "pnl_7d_rank",
+#         "pnl_30d_rank",
+#         "roi_24h_rank",
+#         "roi_7d_rank",
+#         "roi_30d_rank",
+#     )
+# )
 
-client.serve_table(
-    table_name+"_v2",
-    df,
-    primary_key,
-    update=True,
-    throughput=1000,
-)
-
-# COMMAND ----------
-
-# DBTITLE 1,Leaderboard
-table_name = "zetadex_mainnet_tx.agg_pnl"
-primary_key = {"name": "metric#timePeriod", "type": "S"}
-sort_key = {"name": "rank", "type": "N"}
-
-local_secondary_indexes = [
-    {
-        "index_name": "metric-timePeriod-marginAccount-index",
-        "sort_key": {"name": "marginAccount", "type": "S"},
-        "projection_type": "ALL",
-    }
-]
-
-df = (
-    spark.table(table_name)
-    .filter("date_ == current_date")
-    .filter("timestamp == date_trunc('hour', current_timestamp)")
-    .select(
-        "timestamp",
-        "authority",
-        "margin_account",
-        # "balance",
-        # "unrealized_pnl",
-        # "equity",
-        # "cumulative_pnl",
-        # metrics
-        "pnl_24h",
-        "pnl_7d",
-        "pnl_30d",
-        "pnl_alltime",
-        "roi_24h",
-        "roi_7d",
-        "roi_30d",
-        "pnl_24h_rank",
-        "pnl_7d_rank",
-        "pnl_30d_rank",
-        "pnl_alltime_rank",
-        "roi_24h_rank",
-        "roi_7d_rank",
-        "roi_30d_rank",
-        "pnl_24h_rank_change",
-        "pnl_7d_rank_change",
-        "pnl_30d_rank_change",
-        "pnl_alltime_rank_change",
-        "roi_24h_rank_change",
-        "roi_7d_rank_change",
-        "roi_30d_rank_change",
-        # z-scores
-        "volume_24h",
-        "volume_7d",
-        "volume_30d",
-        "volume_alltime",
-        "z_multiplier_24h",
-        "z_multiplier_7d",
-        "z_multiplier_30d",
-        "z_multiplier_alltime",
-        "z_score_24h",
-        "z_score_7d",
-        "z_score_30d",
-        "z_score_alltime",
-        "z_score_24h_rank",
-        "z_score_7d_rank",
-        "z_score_30d_rank",
-        "z_score_alltime_rank",
-        "z_score_24h_rank_change",
-        "z_score_7d_rank_change",
-        "z_score_30d_rank_change",
-        "z_score_alltime_rank_change",
-    )
-)
-
-from functools import reduce
-
-# Fixed columns you don't want to unpivot
-id_vars = ["timestamp", "authority", "margin_account"]
-
-# Metrics and periods you're working with
-metrics = ["pnl", "roi", "z_score"]
-periods = ["24h", "7d", "30d", "alltime"]
-period_map = {
-    "24h": "TWENTY_FOUR_HOURS",
-    "7d": "SEVEN_DAYS",
-    "30d": "THIRTY_DAYS",
-    "alltime": "ALL_TIME",
-}
-
-# Unpivot the DataFrame
-dfs = []  # List to collect DataFrames for union later
-for metric in metrics:
-    for period in periods:
-        # no roi alltime rn
-        if metric == "roi" and period == "alltime":
-            continue
-        # Build the metric, time_period, value, and rank columns
-        df_temp = (
-            df.withColumn(
-                "metric#time_period", F.lit(f"{metric.upper()}#{period_map[period]}")
-            )
-            .withColumn("pnl", F.col(f"pnl_{period}"))
-            .withColumn("z_score", F.col(f"z_score_{period}"))
-            .withColumn("z_multiplier", F.col(f"z_multiplier_{period}"))
-            .withColumn("volume", F.col(f"volume_{period}"))
-            .withColumn("rank", F.col(f"{metric}_{period}_rank"))
-            .withColumn("rank_change", F.col(f"{metric}_{period}_rank_change"))
-        )
-
-        if period == "alltime":
-            df_temp = df_temp.withColumn("roi", F.lit(None))
-        else:
-            df_temp = df_temp.withColumn("roi", F.col(f"roi_{period}"))
-
-        df_temp = df_temp.select(
-            id_vars
-            + [
-                "metric#time_period",
-                "pnl",
-                "roi",
-                "z_score",
-                "z_multiplier",
-                "volume",
-                "rank",
-                "rank_change",
-            ]
-        )  # select necessary columns
-        dfs.append(df_temp)
-
-# Combine all the temporary DataFrames
-df = reduce(lambda df1, df2: df1.union(df2), dfs)
-
-# Rename columns to camelCase
-for col in df.columns:
-    df = df.withColumnRenamed(col, to_camel_case(col))
-
-client.serve_table(
-    "zetadex_mainnet_tx.leaderboard_v2",
-    df,
-    primary_key,
-    sort_key,
-    local_secondary_indexes=local_secondary_indexes,
-    update=True,
-    throughput=1000,
-)
+# client.serve_table(
+#     table_name,
+#     df,
+#     primary_key,
+#     global_secondary_indexes=global_secondary_indexes,
+#     update=True,
+#     throughput=1000,
+# )
 
 # COMMAND ----------
 
 # DBTITLE 1,PnL Historical
 table_name = "zetadex_mainnet_tx.cleaned_pnl"
-primary_key = {"name": "marginAccount", "type": "S"}
+primary_key = {"name": "authority", "type": "S"}
 sort_key = {"name": "timestamp", "type": "N"}
 
 df = (
     spark.table(table_name)
     .filter("timestamp == date_trunc('hour', current_timestamp)")
+    # .filter("timestamp >= current_timestamp - interval 1 week")
+    # Temporary hack to get it to work with legacy pnl index
+    .groupBy("timestamp","authority")
+    .agg(F.sum("balance").alias("balance"), F.sum("unrealized_pnl").alias("unrealized_pnl"), F.sum("equity").alias("equity"), F.sum("cumulative_pnl").alias("cumulative_pnl"))
     .select(
         "timestamp",
         "authority",
-        "margin_account",
+        # "margin_account",
         "balance",
         "unrealized_pnl",
         "equity",
@@ -577,13 +451,9 @@ df = (
     )
 )
 
-# Rename columns to camelCase
-for col in df.columns:
-    df = df.withColumnRenamed(col, to_camel_case(col))
-
 # Hourly
 client.serve_table(
-    table_name + "_hourly"+"_v2",
+    table_name + "_hourly",
     df.withColumn("ttl", F.col("timestamp") + F.expr('INTERVAL 2 WEEKS')), # expire datapoints after 2 weeks
     primary_key,
     sort_key,
@@ -592,7 +462,7 @@ client.serve_table(
 
 # Daily
 client.serve_table(
-    table_name + "_daily"+"_v2",
+    table_name + "_daily",
     df.filter(F.hour("timestamp") == 0),
     primary_key,
     sort_key,
@@ -601,47 +471,38 @@ client.serve_table(
 
 # COMMAND ----------
 
-# DBTITLE 1,Exchange Stats
-# 24hr Rolling Stats
+# DBTITLE 1,Rolling 24H Exchange Stats
+table_name = "zetadex_mainnet_tx.agg_ix_trade_asset_24h_rolling"
+primary_key = {"name": "asset", "type": "S"}
+sort_key = {"name": "timestamp", "type": "N"}
 
-df_24hr = (
-    spark.table("zetadex_mainnet_tx.agg_ix_trade_asset_24h_rolling")
+df = (
+    spark.table(table_name)
     .filter("timestamp == date_trunc('hour', current_timestamp - interval 1 hour)")
     # aggregate up the sums across all assets
     .rollup("asset")
     .agg(
         F.max("timestamp").alias("timestamp"),  # Use the max timestamp
-        F.sum("trade_count_24h").alias("trade_count"),
-        F.sum("volume_24h").alias("volume"),
+        F.sum("trade_count_24h").alias("trade_count_24h"),
+        F.sum("volume_24h").alias("volume_24h"),
     )
-    .withColumn("asset#time_period", F.concat_ws("#", F.coalesce("asset", F.lit("ALL_ASSETS")), F.lit("TWENTY_FOUR_HOURS")) )
-    .drop("asset")
-)
-# All Time Stats
-# Account for volume and trades not in helius data
-V1_VOLUME = 455316870.8536678
-v1_TRADE_COUNT = 200322
-
-df_alltime = (
-    spark.table("zetadex_mainnet_tx.agg_ix_trade_1h")
-    .agg(
-        F.max("timestamp").alias("timestamp"),  # Use the max timestamp
-        (F.sum("trade_count") + v1_TRADE_COUNT).alias("trade_count"),
-        (F.sum("volume") + V1_VOLUME).alias("volume"),
-    )
-    .withColumn("asset#time_period", F.concat_ws("#", F.lit("ALL_ASSETS"), F.lit("ALL_TIME")) )
+    .withColumn("asset", F.coalesce("asset", F.lit("ALL_ASSETS")))
 )
 
-df = df_24hr.union(df_alltime)
+client.serve_table(table_name, df, primary_key, sort_key)
 
-# Rename columns to camelCase
-for col in df.columns:
-    df = df.withColumnRenamed(col, to_camel_case(col))
+# COMMAND ----------
 
-primary_key = {"name": "asset#timePeriod", "type": "S"}
-sort_key = {"name": "timestamp", "type": "N"}
+# DBTITLE 1,1H Exchange Stats
+# table_name = "zetadex_mainnet_tx.agg_ix_trade_1h"
+# primary_key = {"name": "asset", "type": "S"}
+# sort_key = {"name": "timestamp", "type": "N"}
 
-client.serve_table("zetadex_mainnet_tx.stats_v2", df, primary_key, sort_key)
+# df = spark.table(table_name) \
+#     .withColumn("asset", F.lit("ALL_ASSETS")) \
+#     .filter("timestamp == date_trunc('hour', current_timestamp - interval 1 hour)")
+
+# client.serve_table(table_name, df, primary_key, sort_key)
 
 # COMMAND ----------
 
@@ -651,12 +512,7 @@ primary_key = {"name": "authority", "type": "S"}
 sort_key = {"name": "epoch", "type": "N"}
 
 df = spark.table(table_name)
-
-# Rename columns to camelCase
-for col in df.columns:
-    df = df.withColumnRenamed(col, to_camel_case(col))
-
-client.serve_table(table_name+"_v2", df, primary_key, sort_key)
+client.serve_table(table_name, df, primary_key, sort_key)
 
 # COMMAND ----------
 
@@ -666,12 +522,7 @@ primary_key = {"name": "authority", "type": "S"}
 sort_key = {"name": "epoch", "type": "N"}
 
 df = spark.table(table_name)
-
-# Rename columns to camelCase
-for col in df.columns:
-    df = df.withColumnRenamed(col, to_camel_case(col))
- 
-client.serve_table(table_name+"_v2", df, primary_key, sort_key)
+client.serve_table(table_name, df, primary_key, sort_key)
 
 # COMMAND ----------
 
@@ -682,11 +533,7 @@ sort_key = {"name": "epoch", "type": "N"}
 
 df = spark.table(table_name)
 
-# Rename columns to camelCase
-for col in df.columns:
-    df = df.withColumnRenamed(col, to_camel_case(col))
-
-client.serve_table(table_name+"_v2", df, primary_key, sort_key)
+client.serve_table(table_name, df, primary_key, sort_key)
 
 # COMMAND ----------
 
@@ -697,11 +544,62 @@ sort_key = {"name": "epoch", "type": "N"}
 
 df = spark.table(table_name)
 
-# Rename columns to camelCase
-for col in df.columns:
-    df = df.withColumnRenamed(col, to_camel_case(col))
+client.serve_table(table_name, df, primary_key, sort_key)
 
-client.serve_table(table_name+"_v2", df, primary_key, sort_key)
+# COMMAND ----------
+
+# DBTITLE 1,Mad Wars
+table_name = "madwars.pnl_individual"
+primary_key = {"name": "authority", "type": "S"}
+
+df = (
+    spark.table(table_name)
+    .select(
+        "timestamp",
+        "authority",
+        # "balance",
+        # "unrealized_pnl",
+        # "equity",
+        # "cumulative_pnl",
+        "pnl",
+        "roi",
+        "volume",
+        "pnl_rank_global",
+        "roi_rank_global",
+        "volume_rank_global",
+        "pnl_rank_team",
+        "roi_rank_team",
+        "volume_rank_team",
+        "team",
+        "backpack_username",
+        "multiplier",
+    )
+    .withColumn("_global_gsi", F.lit("GLOBAL"))
+)
+
+client.serve_table(table_name, df, primary_key, update=True, throughput=1000)
+
+table_name = "madwars.pnl_team"
+primary_key = {"name": "team", "type": "S"}
+
+df = (
+    spark.table(table_name)
+    .select(
+        "timestamp",
+        "team",
+        # "equity",
+        # "cumulative_pnl",
+        "pnl",
+        "roi",
+        "volume",
+        "pnl_rank",
+        "roi_rank",
+        "volume_rank",
+    )
+    .withColumn("_global_gsi", F.lit("GLOBAL"))
+)
+
+client.serve_table(table_name, df, primary_key, update=True)
 
 # COMMAND ----------
 

@@ -45,7 +45,15 @@ def cleaned_trades_rewards():
     df = (
         # dlt.read("cleaned_trades")
         spark.table("zetadex_mainnet_tx.cleaned_ix_trade")
-        .select("block_time", "epoch", "asset", "authority", "maker_taker", "volume", "trading_fee")
+        .select(
+            "block_time",
+            "epoch",
+            "asset",
+            "authority",
+            "maker_taker",
+            "volume",
+            "trading_fee",
+        )
         .filter(F.col("epoch") >= "2023-04-07T08:00:00")
     )
     return df
@@ -67,7 +75,10 @@ def agg_trades_rewards_epoch_user_asset_v():
 
 @dlt.table(
     comment="Maker rewards by epoch-user-asset",
-    table_properties={"quality": "gold", "pipelines.autoOptimize.zOrderCols": "authority"},
+    table_properties={
+        "quality": "gold",
+        "pipelines.autoOptimize.zOrderCols": "authority",
+    },
     # partition_cols=["epoch"],
     path=join(BASE_PATH_TRANSFORMED, REWARDS_TABLE, "agg-maker-epoch-user-asset"),
 )
@@ -80,9 +91,9 @@ def agg_maker_rewards_epoch_user_asset():
     w_user = Window.partitionBy("epoch", "authority")
     w = Window.partitionBy("epoch")
 
-    num_assets = agg_trades_rewards_epoch_user_asset_v.groupBy(
-        "epoch"
-    ).agg(F.countDistinct("asset").alias("num_assets"))
+    num_assets = agg_trades_rewards_epoch_user_asset_v.groupBy("epoch").agg(
+        F.countDistinct("asset").alias("num_assets")
+    )
 
     labels = spark.table("zetadex_mainnet.pubkey_label")
     maker_rewards = (
@@ -114,9 +125,9 @@ def agg_maker_rewards_epoch_user_asset():
             "maker_bonus",
             F.when(
                 (F.col("maker_asset_volume_rank") == 1),
-                float(spark.conf.get("params.MAKER_BONUS_PER_EPOCH")) / F.col("num_assets"),
-            )
-            .otherwise(0),
+                float(spark.conf.get("params.MAKER_BONUS_PER_EPOCH"))
+                / F.col("num_assets"),
+            ).otherwise(0),
         )
         .select(
             "epoch",
@@ -133,7 +144,10 @@ def agg_maker_rewards_epoch_user_asset():
 
 @dlt.table(
     comment="Taker rewards by epoch-user-asset",
-    table_properties={"quality": "gold", "pipelines.autoOptimize.zOrderCols": "authority"},
+    table_properties={
+        "quality": "gold",
+        "pipelines.autoOptimize.zOrderCols": "authority",
+    },
     # partition_cols=["epoch"],
     path=join(BASE_PATH_TRANSFORMED, REWARDS_TABLE, "agg-taker-epoch-user-asset"),
 )
@@ -159,7 +173,9 @@ def agg_taker_rewards_epoch_user_asset():
             * float(spark.conf.get("params.TAKER_BONUS_PER_EPOCH"))
             / F.count("asset").over(w_user),
         )
-        .select("epoch", "asset", "authority", "taker_volume", "taker_fee", "taker_bonus")
+        .select(
+            "epoch", "asset", "authority", "taker_volume", "taker_fee", "taker_bonus"
+        )
     )
 
     return taker_rewards
@@ -167,7 +183,10 @@ def agg_taker_rewards_epoch_user_asset():
 
 @dlt.table(
     comment="Maker rewards by epoch-user",
-    table_properties={"quality": "gold", "pipelines.autoOptimize.zOrderCols": "authority"},
+    table_properties={
+        "quality": "gold",
+        "pipelines.autoOptimize.zOrderCols": "authority",
+    },
     # partition_cols=["epoch"],
     path=join(BASE_PATH_TRANSFORMED, REWARDS_TABLE, "agg-maker-epoch-user"),
 )
@@ -202,7 +221,10 @@ def agg_maker_rewards_epoch_user():
 
 @dlt.table(
     comment="Taker rewards by epoch-user",
-    table_properties={"quality": "gold", "pipelines.autoOptimize.zOrderCols": "authority"},
+    table_properties={
+        "quality": "gold",
+        "pipelines.autoOptimize.zOrderCols": "authority",
+    },
     # partition_cols=["epoch"],
     path=join(BASE_PATH_TRANSFORMED, REWARDS_TABLE, "agg-taker-epoch-user"),
 )
@@ -293,9 +315,8 @@ def agg_referrer_rewards_epoch_user():
     )
 
     referrer_rewards = (
-        agg_trades_rewards_epoch_referee_referrer_v.alias("r1").withColumn(
-            "referral_volume_30d", F.sum("volume").over(w_referee_referrer_30d)
-        )
+        agg_trades_rewards_epoch_referee_referrer_v.alias("r1")
+        .withColumn("referral_volume_30d", F.sum("volume").over(w_referee_referrer_30d))
         .groupBy("epoch", "referrer", "alias")
         .agg(
             F.sum("volume").alias("referral_volume"),
@@ -334,15 +355,17 @@ def agg_referrer_rewards_epoch_user():
             "referrer_fee_rebate",
             F.when(
                 F.col("referrer_tier") == 3,
-                F.col("referral_fee") * 0.2/2,  # 50% of 2bps = 1bp # I've divided all by 2 for new fees
+                F.col("referral_fee")
+                * 0.2
+                / 2,  # 50% of 2bps = 1bp # I've divided all by 2 for new fees
             )
             .when(
                 F.col("referrer_tier") == 2,
-                F.col("referral_fee") * 0.15/2,  # 0.75bps
+                F.col("referral_fee") * 0.15 / 2,  # 0.75bps
             )
             .when(
                 F.col("referrer_tier") == 1,
-                F.col("referral_fee") * 0.1/2,  # 0.5bp
+                F.col("referral_fee") * 0.1 / 2,  # 0.5bp
             )
             .otherwise(0),
         )
@@ -383,9 +406,11 @@ def agg_referee_rewards_epoch_user():
         .join(referrer_rewards, on=["epoch", "referrer"], how="left")
         .withColumn(
             "referee_fee_rebate",
-            F.when(F.col("referrer_tier") == 3, F.col("trading_fee") * 0.02/2)  # 5% of 2bps
-            .when(F.col("referrer_tier") == 2, F.col("trading_fee") * 0.02/2)
-            .when(F.col("referrer_tier") == 1, F.col("trading_fee") * 0.02/2)
+            F.when(
+                F.col("referrer_tier") == 3, F.col("trading_fee") * 0.02 / 2
+            )  # 5% of 2bps
+            .when(F.col("referrer_tier") == 2, F.col("trading_fee") * 0.02 / 2)
+            .when(F.col("referrer_tier") == 1, F.col("trading_fee") * 0.02 / 2)
             .otherwise(0),
         )
         .select(
