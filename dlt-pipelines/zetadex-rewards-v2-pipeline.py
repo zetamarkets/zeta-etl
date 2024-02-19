@@ -121,14 +121,21 @@ def agg_maker_rewards_epoch_user_asset():
             .otherwise(0),
         )
         .join(num_assets, on=["epoch"], how="left")
-        .withColumn(
-            "maker_bonus",
+    .withColumn(
+        "maker_bonus",
+        F.when(
+            F.col("epoch") >= "2023-10-20 08:00:00.000",
+            F.col("maker_volume_share")
+            * float(spark.conf.get("params.MAKER_BONUS_PER_EPOCH"))
+            / F.col("num_assets"),
+        ).otherwise(
             F.when(
                 (F.col("maker_asset_volume_rank") == 1),
                 float(spark.conf.get("params.MAKER_BONUS_PER_EPOCH"))
                 / F.col("num_assets"),
-            ).otherwise(0),
-        )
+            ).otherwise(0)
+        ),
+    )
         .select(
             "epoch",
             "asset",
@@ -270,7 +277,7 @@ def agg_trades_rewards_epoch_referee_referrer_v():
         .withColumnRenamed("referral", "referee")
         .alias("r1")
         .join(
-            cleaned_trades_rewards_v.alias("t").filter("block_time >= '2022-09-02T08'"),
+            cleaned_trades_rewards_v.alias("t").filter("block_time >= '2022-09-02T08'").filter("block_time < '2023-11-24T08'"),
             F.expr(
                 """
                 t.authority == r1.referee

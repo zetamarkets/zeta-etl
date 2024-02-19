@@ -1,5 +1,5 @@
 # Databricks notebook source
-import pyspark.sql.functions as F
+from pyspark.sql import functions as F, Window as W
 import pyspark.sql.types as T
 from datetime import datetime, timezone
 
@@ -347,7 +347,7 @@ local_secondary_indexes = [
 df = (
     spark.table(table_name)
     .filter(
-        "timestamp == date_trunc('hour', current_timestamp - interval 1 hour)"  # getting last hour funding because current hour funding is incomplete
+        "timestamp == date_trunc('hour', current_timestamp - interval 2 hour)"  # getting last hour funding because current hour funding is incomplete. Update: need to make it 2hr delay because of agg in gold tables windowing + watermarking?
     )
     .withColumn(
         "timestamp#asset", F.concat_ws("#", F.unix_timestamp("timestamp"), "asset")
@@ -358,58 +358,58 @@ df = (
 for col in df.columns:
     df = df.withColumnRenamed(col, to_camel_case(col))
 
-client.serve_table(table_name+"_v2", df, primary_key, sort_key, local_secondary_indexes=local_secondary_indexes)
+client.serve_table(table_name+"_v2", df, primary_key, sort_key, local_secondary_indexes=local_secondary_indexes, throughput=100000)
 
 # COMMAND ----------
 
 # DBTITLE 1,PnL
-table_name = "zetadex_mainnet_tx.agg_pnl"
-primary_key = {"name": "marginAccount", "type": "S"}
+# table_name = "zetadex_mainnet_tx.agg_pnl"
+# primary_key = {"name": "marginAccount", "type": "S"}
 
-df = (
-    spark.table(table_name)
-    .filter("date_ == current_date")
-    .filter("timestamp == date_trunc('hour', current_timestamp)")
-    .select(
-        "timestamp",
-        "authority",
-        "margin_account",
-        "balance",
-        "unrealized_pnl",
-        "equity",
-        "cumulative_pnl",
-        "pnl_24h",
-        "pnl_7d",
-        "pnl_30d",
-        "roi_24h",
-        "roi_7d",
-        "roi_30d",
-        "pnl_24h_rank",
-        "pnl_7d_rank",
-        "pnl_30d_rank",
-        "roi_24h_rank",
-        "roi_7d_rank",
-        "roi_30d_rank",
-        "pnl_24h_rank_change",
-        "pnl_7d_rank_change",
-        "pnl_30d_rank_change",
-        "roi_24h_rank_change",
-        "roi_7d_rank_change",
-        "roi_30d_rank_change",
-    )
-)
+# df = (
+#     spark.table(table_name)
+#     .filter("date_ == current_date")
+#     .filter("timestamp == date_trunc('hour', current_timestamp)")
+#     .select(
+#         "timestamp",
+#         "authority",
+#         "margin_account",
+#         "balance",
+#         "unrealized_pnl",
+#         "equity",
+#         "cumulative_pnl",
+#         "pnl_24h",
+#         "pnl_7d",
+#         "pnl_30d",
+#         "roi_24h",
+#         "roi_7d",
+#         "roi_30d",
+#         "pnl_24h_rank",
+#         "pnl_7d_rank",
+#         "pnl_30d_rank",
+#         "roi_24h_rank",
+#         "roi_7d_rank",
+#         "roi_30d_rank",
+#         "pnl_24h_rank_change",
+#         "pnl_7d_rank_change",
+#         "pnl_30d_rank_change",
+#         "roi_24h_rank_change",
+#         "roi_7d_rank_change",
+#         "roi_30d_rank_change",
+#     )
+# )
 
-# Rename columns to camelCase
-for col in df.columns:
-    df = df.withColumnRenamed(col, to_camel_case(col))
+# # Rename columns to camelCase
+# for col in df.columns:
+#     df = df.withColumnRenamed(col, to_camel_case(col))
 
-client.serve_table(
-    table_name+"_v2",
-    df,
-    primary_key,
-    update=True,
-    throughput=1000,
-)
+# client.serve_table(
+#     table_name+"_v2",
+#     df,
+#     primary_key,
+#     update=True,
+#     throughput=10000,
+# )
 
 # COMMAND ----------
 
@@ -430,6 +430,9 @@ df = (
     spark.table(table_name)
     .filter("date_ == current_date")
     .filter("timestamp == date_trunc('hour', current_timestamp)")
+    # .withColumn("max_timestamp", F.max("timestamp").over(W.orderBy()))
+    # .filter(F.col("timestamp") == F.col("max_timestamp"))
+    # .drop("max_timestamp")
     .select(
         "timestamp",
         "authority",
@@ -461,13 +464,18 @@ df = (
         "roi_7d_rank_change",
         "roi_30d_rank_change",
         # z-scores
-        "volume_24h",
-        "volume_7d",
-        "volume_30d",
-        "volume_alltime",
+        "maker_volume_24h",
+        "maker_volume_7d",
+        "maker_volume_30d",
+        "maker_volume_alltime",
+        "taker_volume_24h",
+        "taker_volume_7d",
+        "taker_volume_30d",
+        "taker_volume_alltime",
         "z_multiplier_24h",
         "z_multiplier_7d",
         "z_multiplier_30d",
+        "z_multiplier_nft",
         "z_multiplier_alltime",
         "z_score_24h",
         "z_score_7d",
@@ -514,7 +522,8 @@ for metric in metrics:
             .withColumn("pnl", F.col(f"pnl_{period}"))
             .withColumn("z_score", F.col(f"z_score_{period}"))
             .withColumn("z_multiplier", F.col(f"z_multiplier_{period}"))
-            .withColumn("volume", F.col(f"volume_{period}"))
+            .withColumn("maker_volume", F.col(f"maker_volume_{period}"))
+            .withColumn("taker_volume", F.col(f"taker_volume_{period}"))
             .withColumn("rank", F.col(f"{metric}_{period}_rank"))
             .withColumn("rank_change", F.col(f"{metric}_{period}_rank_change"))
         )
@@ -532,7 +541,9 @@ for metric in metrics:
                 "roi",
                 "z_score",
                 "z_multiplier",
-                "volume",
+                "z_multiplier_nft",
+                "maker_volume",
+                "taker_volume",
                 "rank",
                 "rank_change",
             ]
@@ -547,13 +558,13 @@ for col in df.columns:
     df = df.withColumnRenamed(col, to_camel_case(col))
 
 client.serve_table(
-    "zetadex_mainnet_tx.leaderboard_v2",
+    "zetadex_mainnet_tx.leaderboard_v2_s2",
     df,
     primary_key,
     sort_key,
     local_secondary_indexes=local_secondary_indexes,
     update=True,
-    throughput=1000,
+    throughput=1000000,
 )
 
 # COMMAND ----------
@@ -596,7 +607,7 @@ client.serve_table(
     df.filter(F.hour("timestamp") == 0),
     primary_key,
     sort_key,
-    throughput=1000,
+    throughput=100000,
 )
 
 # COMMAND ----------
@@ -606,13 +617,15 @@ client.serve_table(
 
 df_24hr = (
     spark.table("zetadex_mainnet_tx.agg_ix_trade_asset_24h_rolling")
-    .filter("timestamp == date_trunc('hour', current_timestamp - interval 1 hour)")
+    .filter("timestamp == date_trunc('hour', current_timestamp - interval 2 hour)") # 2 because of the gold table agg being watermarked?
+    .filter("asset != 'UNDEFINED'")
     # aggregate up the sums across all assets
     .rollup("asset")
     .agg(
         F.max("timestamp").alias("timestamp"),  # Use the max timestamp
         F.sum("trade_count_24h").alias("trade_count"),
         F.sum("volume_24h").alias("volume"),
+        F.when(F.col("asset").isNull(), F.collect_list(F.struct("asset", F.col("trade_count_24h").alias("tradeCount"), F.col("volume_24h").alias("volume")))).alias("components")
     )
     .withColumn("asset#time_period", F.concat_ws("#", F.coalesce("asset", F.lit("ALL_ASSETS")), F.lit("TWENTY_FOUR_HOURS")) )
     .drop("asset")
@@ -628,6 +641,7 @@ df_alltime = (
         F.max("timestamp").alias("timestamp"),  # Use the max timestamp
         (F.sum("trade_count") + v1_TRADE_COUNT).alias("trade_count"),
         (F.sum("volume") + V1_VOLUME).alias("volume"),
+        F.lit(None).alias("components")
     )
     .withColumn("asset#time_period", F.concat_ws("#", F.lit("ALL_ASSETS"), F.lit("ALL_TIME")) )
 )
@@ -661,39 +675,53 @@ client.serve_table(table_name+"_v2", df, primary_key, sort_key)
 # COMMAND ----------
 
 # DBTITLE 1,Taker Rewards
-table_name = "zetadex_mainnet_rewards.agg_taker_rewards_epoch_user"
-primary_key = {"name": "authority", "type": "S"}
-sort_key = {"name": "epoch", "type": "N"}
+# table_name = "zetadex_mainnet_rewards.agg_taker_rewards_epoch_user"
+# primary_key = {"name": "authority", "type": "S"}
+# sort_key = {"name": "epoch", "type": "N"}
 
-df = spark.table(table_name)
+# df = spark.table(table_name)
 
-# Rename columns to camelCase
-for col in df.columns:
-    df = df.withColumnRenamed(col, to_camel_case(col))
+# # Rename columns to camelCase
+# for col in df.columns:
+#     df = df.withColumnRenamed(col, to_camel_case(col))
  
-client.serve_table(table_name+"_v2", df, primary_key, sort_key)
+# client.serve_table(table_name+"_v2", df, primary_key, sort_key)
 
 # COMMAND ----------
 
 # DBTITLE 1,Referrer Rewards
-table_name = "zetadex_mainnet_rewards.agg_referrer_rewards_epoch_user"
-primary_key = {"name": "referrer", "type": "S"}
-sort_key = {"name": "epoch", "type": "N"}
+# table_name = "zetadex_mainnet_rewards.agg_referrer_rewards_epoch_user"
+# primary_key = {"name": "referrer", "type": "S"}
+# sort_key = {"name": "epoch", "type": "N"}
 
-df = spark.table(table_name)
+# df = spark.table(table_name)
 
-# Rename columns to camelCase
-for col in df.columns:
-    df = df.withColumnRenamed(col, to_camel_case(col))
+# # Rename columns to camelCase
+# for col in df.columns:
+#     df = df.withColumnRenamed(col, to_camel_case(col))
 
-client.serve_table(table_name+"_v2", df, primary_key, sort_key)
+# client.serve_table(table_name+"_v2", df, primary_key, sort_key)
 
 # COMMAND ----------
 
 # DBTITLE 1,Referee Rewards
-table_name = "zetadex_mainnet_rewards.agg_referee_rewards_epoch_user"
-primary_key = {"name": "referee", "type": "S"}
-sort_key = {"name": "epoch", "type": "N"}
+# table_name = "zetadex_mainnet_rewards.agg_referee_rewards_epoch_user"
+# primary_key = {"name": "referee", "type": "S"}
+# sort_key = {"name": "epoch", "type": "N"}
+
+# df = spark.table(table_name)
+
+# # Rename columns to camelCase
+# for col in df.columns:
+#     df = df.withColumnRenamed(col, to_camel_case(col))
+
+# client.serve_table(table_name+"_v2", df, primary_key, sort_key)
+
+# COMMAND ----------
+
+table_name = "zetadex_mainnet_tx.fee_tiers"
+primary_key = {"name": "authority", "type": "S"}
+sort_key = {"name": "timestamp", "type": "N"}
 
 df = spark.table(table_name)
 
@@ -701,8 +729,32 @@ df = spark.table(table_name)
 for col in df.columns:
     df = df.withColumnRenamed(col, to_camel_case(col))
 
-client.serve_table(table_name+"_v2", df, primary_key, sort_key)
+client.serve_table(
+    "zetadex_mainnet_tx.fee_tiers",
+    df,
+    primary_key,
+    sort_key,
+    throughput=100000,
+)
 
 # COMMAND ----------
 
+# import concurrent.futures
 
+# def write_to_dynamo(df, table_name, region, batch_size, update, throughput, mode):
+#     df.write.option("tableName", table_name).option(
+#         "region", region
+#     ).option("writeBatchSize", batch_size).option("update", update).option(
+#         "throughput", throughput
+#     ).mode(
+#         mode
+#     ).format(
+#         "dynamodb"
+#     ).save()
+
+# # Assuming dataframes is a list of your dataframes
+# dataframes = [df1, df2, df3, ...]
+
+# with concurrent.futures.ThreadPoolExecutor() as executor:
+#     for df in dataframes:
+#         executor.submit(write_to_dynamo, df, table_name, region, batch_size, update, throughput, mode)

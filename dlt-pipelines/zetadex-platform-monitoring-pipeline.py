@@ -27,10 +27,6 @@ BASE_PATH_TRANSFORMED = join("/mnt", S3_BUCKET_TRANSFORMED)
 
 # COMMAND ----------
 
-spark.read.json(join(BASE_PATH_LANDED, MONITORING_ORDERS_TABLE, "data"))
-
-# COMMAND ----------
-
 monitoring_orders_schema = """
 underlying string,
 timestamp timestamp,
@@ -57,11 +53,6 @@ def raw_monitoring_orders():
         .schema(monitoring_orders_schema)
         .load(join(BASE_PATH_LANDED, MONITORING_ORDERS_TABLE, "data"))
     )
-
-# COMMAND ----------
-
-# MAGIC %sql
-# MAGIC select * from zetadex_mainnet.raw_monitoring_orders order by timestamp desc
 
 # COMMAND ----------
 
